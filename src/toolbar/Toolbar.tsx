@@ -9,8 +9,10 @@ import {
   Minus,
   MousePointer2,
   Move,
+  PanelTop,
   Pen,
   Power,
+  Presentation,
   Redo2,
   Settings,
   Square,
@@ -141,7 +143,7 @@ export default function Toolbar(): React.JSX.Element {
   const [size, setSize] = useState(saved.size ?? 6);
   const [theme, setTheme] = useState<Theme>(saved.theme ?? "system");
   const [mode, setMode] = useState(false);
-  const [, setBg] = useState<Bg>("none");
+  const [bg, setBg] = useState<Bg>("none");
   const [, setHidden] = useState(false);
   const [hist, setHist] = useState<HistoryState>({
     canUndo: false,
@@ -343,13 +345,13 @@ export default function Toolbar(): React.JSX.Element {
           </Tip>
 
           <div className="flex shrink-0 flex-col gap-0.5">
-            {TOOL_DEFS.map(({ id, name, key, accel }) => {
+            {TOOL_DEFS.map(({ id, name, accel }) => {
               const Icon = TOOL_ICONS[id];
               return (
                 <Tip
                   key={id}
                   label={name}
-                  keys={[`Ctrl+Shift+${accel}`, key.toUpperCase()]}
+                  keys={[`Ctrl+Shift+${accel}`]}
                 >
                   <Button
                     variant="ghost"
@@ -429,7 +431,11 @@ export default function Toolbar(): React.JSX.Element {
                         ? "border-transparent bg-accent text-accent-foreground"
                         : "border-border bg-secondary/50 text-muted-foreground hover:bg-accent hover:text-accent-foreground",
                     )}
-                    onClick={() => setSize(preset.value)}
+                    onClick={() => {
+                      setSize(preset.value);
+                      setSizeOpen(false);
+                      syncInteractive(false);
+                    }}
                   >
                     <SizeDot value={preset.value} />
                   </button>
@@ -449,6 +455,45 @@ export default function Toolbar(): React.JSX.Element {
               onClick={() => window.openpen.send("toggle-picker")}
             />
           </Tip>
+
+          <Separator className="my-0.5 shrink-0" />
+
+          <div className="flex shrink-0 flex-col gap-0.5">
+            <Tip label="Whiteboard" keys={["Ctrl+Shift+W"]}>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Whiteboard"
+                aria-pressed={bg === "white"}
+                className={cn(
+                  "h-7 w-full rounded-sm px-0 [&_svg]:size-3.5",
+                  bg === "white" &&
+                    !screenshotting &&
+                    "bg-accent text-accent-foreground",
+                )}
+                onClick={() => window.openpen.send("set-bg", "white")}
+              >
+                <Presentation />
+              </Button>
+            </Tip>
+            <Tip label="Blackboard" keys={["Ctrl+Shift+B"]}>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Blackboard"
+                aria-pressed={bg === "black"}
+                className={cn(
+                  "h-7 w-full rounded-sm px-0 [&_svg]:size-3.5",
+                  bg === "black" &&
+                    !screenshotting &&
+                    "bg-accent text-accent-foreground",
+                )}
+                onClick={() => window.openpen.send("set-bg", "black")}
+              >
+                <PanelTop />
+              </Button>
+            </Tip>
+          </div>
 
           <Separator className="my-0.5 shrink-0" />
 

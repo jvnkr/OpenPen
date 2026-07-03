@@ -854,7 +854,10 @@ function wireIpc (): void {
     e.sender.send('bg', state.bg)
   })
   ipcMain.on('overlay-cursor-ready', () => {
-    if (state.mode) return
+    if (state.mode) {
+      for (const win of overlays.values()) repaintOverlayCursor(win)
+      return
+    }
     if (mouseModeFallback) {
       clearTimeout(mouseModeFallback)
       mouseModeFallback = null

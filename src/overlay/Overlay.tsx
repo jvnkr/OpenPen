@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Engine, makeCursor, type Point } from './engine'
 import EyeDropper, { type EyeDropData } from './EyeDropper'
-import { TOOL_BY_KEY, type Tool } from '@/tools'
 import type { Bg, ToolState } from '@/types'
 import './overlay.css'
 
@@ -87,9 +86,6 @@ export default function Overlay (): React.JSX.Element {
         return
       }
       if (ev.ctrlKey || ev.altKey || ev.metaKey) return
-      const k = ev.key.toLowerCase()
-      const t: Tool | 'mouse' | undefined = k === 'm' ? 'mouse' : TOOL_BY_KEY[k]
-      if (t) { window.openpen.send('pick-tool', t); return }
       if (ev.key === '[') window.openpen.send('adjust-size', -2)
       else if (ev.key === ']') window.openpen.send('adjust-size', 2)
       else if (ev.key === 'Delete') eng.clearInk()
@@ -137,11 +133,9 @@ export default function Overlay (): React.JSX.Element {
   useEffect(() => {
     if (canvasRef.current) canvasRef.current.style.cursor = cursor
     document.body.style.cursor = cursor
-    if (!mode) {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => window.openpen.send('overlay-cursor-ready'))
-      })
-    }
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => window.openpen.send('overlay-cursor-ready'))
+    })
     return () => { document.body.style.cursor = '' }
   }, [cursor, mode])
 

@@ -25,8 +25,6 @@ Get the latest Windows installer from [Releases](https://github.com/jvnkr/OpenPe
 - Auto-updates from GitHub Releases, with update status in Settings
 - Light and dark themes
 
-Hold **Shift** while drawing shapes to lock to squares, circles, or 45° lines.
-
 ## Hotkeys
 
 ### Global
@@ -44,18 +42,7 @@ Hold **Shift** while drawing shapes to lock to squares, circles, or 45° lines.
 | `Ctrl+Shift+H` | Hide / show ink |
 | `Ctrl+Shift+T` | Show / hide toolbar |
 
-### While drawing
-
-| Key | Action |
-| --- | --- |
-| `P` `H` `E` `T` | Pen, highlighter, eraser, text |
-| `L` `A` `R` `O` | Line, arrow, rectangle, ellipse |
-| `D` | Drag / move objects and text |
-| `M` or `Esc` | Back to mouse mode |
-| `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
-| `[` / `]` or mouse wheel | Brush size down / up |
-| `Delete` | Clear screen |
-| `Shift` + drag | Constrain shape |
+While drawing on the overlay, `[` and `]` (or the mouse wheel) adjust brush size. Hold **Shift** while drawing shapes to lock to squares, circles, or 45° lines.
 
 Text tool: click to place, type, `Enter` to commit, `Shift+Enter` for a new line, `Esc` to cancel.
 
