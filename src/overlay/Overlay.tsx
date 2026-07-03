@@ -155,6 +155,11 @@ export default function Overlay (): React.JSX.Element {
     } else {
       eng.setBrushPreview(null)
     }
+    if (mode && !eyedrop && tool.tool === 'eraser') {
+      eng.setEraserHover(true, tool.size)
+    } else {
+      eng.setEraserHover(false)
+    }
   }, [mode, tool, eyedrop])
 
   const onDown = (ev: React.PointerEvent<HTMLCanvasElement>): void => {

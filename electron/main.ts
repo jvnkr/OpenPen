@@ -693,9 +693,16 @@ function buildSettingsState (): {
   }
 }
 
+function updateAvailable (): boolean {
+  return updateStatus === 'downloading' || updateStatus === 'ready'
+}
+
 function broadcastSettingsState (): void {
-  if (!settingsWin || settingsWin.isDestroyed()) return
-  send(settingsWin, 'settings-state', buildSettingsState())
+  const state = buildSettingsState()
+  if (settingsWin && !settingsWin.isDestroyed()) send(settingsWin, 'settings-state', state)
+  if (toolbar && !toolbar.isDestroyed()) {
+    send(toolbar, 'update-badge', { available: updateAvailable() })
+  }
 }
 
 function notify (title: string, body: string, onClick?: () => void): void {
@@ -718,17 +725,16 @@ function initAutoUpdate (): void {
     updatePendingVersion = info.version
     updateStatus = 'downloading'
     broadcastSettingsState()
-    if (manualUpdateCheck) notify('OpenPen', `Downloading update v${info.version}…`)
   })
   autoUpdater.on('update-not-available', () => {
     updateStatus = manualUpdateCheck ? 'uptodate' : 'idle'
     updatePendingVersion = null
     updateError = null
     broadcastSettingsState()
-    if (manualUpdateCheck) notify('OpenPen', 'You’re on the latest version.')
     manualUpdateCheck = false
   })
   autoUpdater.on('update-downloaded', info => {
+    const fromManualCheck = manualUpdateCheck
     updateReadyVersion = info.version
     updatePendingVersion = null
     updateStatus = 'ready'
@@ -736,15 +742,16 @@ function initAutoUpdate (): void {
     manualUpdateCheck = false
     refreshTray()
     broadcastSettingsState()
-    notify('OpenPen', `Update v${info.version} is ready. Restart to install.`,
-      () => autoUpdater.quitAndInstall())
+    if (!fromManualCheck) {
+      notify('OpenPen', `Update v${info.version} is ready. Restart to install.`,
+        () => autoUpdater.quitAndInstall())
+    }
   })
   autoUpdater.on('error', err => {
     console.error('auto-update error', err)
     updateStatus = manualUpdateCheck ? 'error' : 'idle'
     updateError = err instanceof Error ? err.message : String(err)
     broadcastSettingsState()
-    if (manualUpdateCheck) notify('OpenPen', 'Update check failed.')
     manualUpdateCheck = false
   })
 
@@ -860,6 +867,7 @@ function wireIpc (): void {
     send(toolbar, 'hidden', state.hidden)
     updateTooltipSide()
     pushHistory()
+    send(toolbar, 'update-badge', { available: updateAvailable() })
   })
   ipcMain.on('tool-state', (_e, s: ToolState) => {
     state.toolState = s

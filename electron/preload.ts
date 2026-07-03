@@ -15,7 +15,7 @@ const ON = new Set([
   'tool-state', 'mode', 'bg', 'cmd', 'history',
   'pick-tool', 'adjust-size', 'hidden',
   'color', 'theme', 'picker-open', 'set-color', 'screenshotting',
-  'tooltip-side', 'set-theme', 'settings-state', 'picker-visible', 'eyedrop'
+  'tooltip-side', 'set-theme', 'settings-state', 'update-badge', 'picker-visible', 'eyedrop'
 ])
 
 contextBridge.exposeInMainWorld('openpen', {

@@ -23,6 +23,7 @@ export interface SettingsState {
   updateVersion: string | null
   updateError: string | null
 }
+export interface UpdateBadgeState { available: boolean }
 
 // Messages the renderer SENDS to the main process. `void` = no payload.
 export interface SendMap {
@@ -80,6 +81,7 @@ export interface RecvMap {
   'tooltip-side': 'left' | 'right'
   'set-theme': ThemePref
   'settings-state': SettingsState
+  'update-badge': UpdateBadgeState
   'picker-visible': boolean
   'eyedrop': EyeDropData | null
 }

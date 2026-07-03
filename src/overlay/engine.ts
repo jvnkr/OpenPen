@@ -60,6 +60,7 @@ const toolWidth = (tool: Tool, size: number): number =>
 const PEN_FREEHAND = { thinning: 0.5, smoothing: 0.5, streamline: 0.5, simulatePressure: true, last: true }
 // Highlighter stays a uniform-width marker — no taper, no fake pressure.
 const HL_FREEHAND = { thinning: 0, smoothing: 0.5, streamline: 0.5, simulatePressure: false, last: true }
+const ERASER_HOVER_ALPHA = 0.45
 
 // Closed smooth path through a perfect-freehand outline polygon (midpoint
 // quadratics, per the library's reference renderer).
@@ -376,6 +377,9 @@ export class Engine {
   private pointerX = 0
   private pointerY = 0
   private hasPointer = false
+  private eraserHover = false
+  private eraserHoverSize = 6
+  private hoverEraseId = -1
 
   constructor (canvas: HTMLCanvasElement, onHistory: (h: HistoryState) => void) {
     this.screenC = canvas
@@ -416,18 +420,38 @@ export class Engine {
     if (changed) this.scheduleRepaint()
   }
 
+  // When the eraser is selected, dim the object under the pointer before click.
+  setEraserHover (enabled: boolean, size = 6): void {
+    const changed = enabled !== this.eraserHover || (enabled && size !== this.eraserHoverSize)
+    this.eraserHover = enabled
+    this.eraserHoverSize = size
+    if (!enabled) {
+      if (this.hoverEraseId >= 0) {
+        this.hoverEraseId = -1
+        this.replay()
+      }
+      return
+    }
+    if (changed) this.syncEraserHover()
+  }
+
   // Track the pointer for the preview ring; null hides it (pointer left).
   setPointer (x: number | null, y = 0): void {
     if (x === null) {
       if (!this.hasPointer) return
       this.hasPointer = false
-      this.scheduleRepaint()
+      if (this.previewTool) this.scheduleRepaint()
+      if (this.eraserHover && this.hoverEraseId >= 0) {
+        this.hoverEraseId = -1
+        this.replay()
+      }
       return
     }
     this.hasPointer = true
     this.pointerX = x
     this.pointerY = y
     if (this.previewTool) this.scheduleRepaint()
+    if (this.eraserHover && !this.erasing && !this.dragging) this.syncEraserHover()
   }
 
   begin (tool: Exclude<Tool, 'text'>, color: string, size: number, x: number, y: number, shift: boolean): void {
@@ -439,6 +463,7 @@ export class Engine {
       this.cur = null
       this.erasing = true
       this.eraseSize = size
+      this.hoverEraseId = -1
       this.pendingErase = new Set()
       this.eraseAt(x, y)
       return
@@ -495,6 +520,7 @@ export class Engine {
       // Bundle everything this drag removed into one erase op → one undo.
       if (this.pendingErase.size > 0) this.push({ kind: 'erase', ids: [...this.pendingErase] })
       this.pendingErase = new Set()
+      if (this.eraserHover && this.hasPointer) this.syncEraserHover()
       return
     }
     const c = this.cur
@@ -632,8 +658,7 @@ export class Engine {
   // Topmost visible object under the point, accounting for any moves already
   // applied to it (hit-test the query point in the object's own frame). -1 if
   // the point is empty.
-  private pickAt (x: number, y: number): number {
-    const tol = 8
+  private pickAt (x: number, y: number, tol = 8): number {
     const ops = this.doc.all
     const hidden = this.doc.hiddenIds(this.pendingErase)
     const offs = this.doc.offsets(this.liveDrag())
@@ -646,6 +671,15 @@ export class Engine {
       if (opHit(op, x - (o?.x ?? 0), y - (o?.y ?? 0), tol, this.base)) return op.id
     }
     return -1
+  }
+
+  private syncEraserHover (): void {
+    if (!this.hasPointer) return
+    const tol = Math.max(toolWidth('eraser', this.eraserHoverSize) / 2, 12)
+    const id = this.pickAt(this.pointerX, this.pointerY, tol)
+    if (id === this.hoverEraseId) return
+    this.hoverEraseId = id
+    this.replay()
   }
 
   private eraseAt (x: number, y: number): void {
@@ -682,9 +716,16 @@ export class Engine {
       if (op.kind === 'erase' || op.kind === 'clear' || op.kind === 'move') continue
       if (hidden.has(op.id)) continue
       const o = offs.get(op.id)
+      const hovered = op.id === this.hoverEraseId && !this.erasing
       if (o) {
         this.base.save()
         this.base.translate(o.x, o.y)
+        if (hovered) this.base.globalAlpha = ERASER_HOVER_ALPHA
+        renderOp(this.base, op)
+        this.base.restore()
+      } else if (hovered) {
+        this.base.save()
+        this.base.globalAlpha = ERASER_HOVER_ALPHA
         renderOp(this.base, op)
         this.base.restore()
       } else {

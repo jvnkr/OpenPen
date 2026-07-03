@@ -148,6 +148,7 @@ export default function Toolbar(): React.JSX.Element {
     canRedo: false,
   });
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [updateAvailable, setUpdateAvailable] = useState(false);
   const [screenshotting, setScreenshotting] = useState(false);
   const [sizeOpen, setSizeOpen] = useState(false);
   const [tipSide, setTipSide] = useState<"left" | "right">("left");
@@ -189,6 +190,7 @@ export default function Toolbar(): React.JSX.Element {
       // Reflect the picker's open state so the custom-color button shows its
       // active outline while the picker window is up.
       window.openpen.on("picker-open", setPickerOpen),
+      window.openpen.on("update-badge", (s) => setUpdateAvailable(s.available)),
     ];
     window.openpen.send("toolbar-ready");
     return () => offs.forEach((off) => off());
@@ -498,15 +500,21 @@ export default function Toolbar(): React.JSX.Element {
 
           <Separator className="my-0.5 shrink-0" />
 
-          <Tip label="Settings">
+          <Tip label={updateAvailable ? "Settings (update available)" : "Settings"}>
             <Button
               variant="ghost"
               size="icon"
-              className="h-7 w-full shrink-0 rounded-sm [&_svg]:size-3.5"
-              aria-label="Settings"
+              className="relative h-7 w-full shrink-0 rounded-sm [&_svg]:size-3.5"
+              aria-label={updateAvailable ? "Settings, update available" : "Settings"}
               onClick={() => window.openpen.send("open-settings")}
             >
               <Settings />
+              {updateAvailable && (
+                <span
+                  className="pointer-events-none absolute top-0.5 right-0.5 size-2 rounded-full bg-red-500 ring-2 ring-background"
+                  aria-hidden
+                />
+              )}
             </Button>
           </Tip>
           <Tip label="Quit OpenPen">
