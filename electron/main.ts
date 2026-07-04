@@ -596,14 +596,19 @@ function showCaptureHelp (): void {
   })
 }
 
+function iconBaseName (): string {
+  return app.isPackaged ? 'icon' : 'icon-dev'
+}
+
 function appIconPath (): string {
   // Windows taskbar/title bar reads multi-size assets from .ico; other platforms use .png.
-  const file = process.platform === 'win32' ? 'icon.ico' : 'icon.png'
+  const base = iconBaseName()
+  const file = process.platform === 'win32' ? `${base}.ico` : `${base}.png`
   return path.join(__dirname, '..', 'build', file)
 }
 
 function makeTrayIcon (): Electron.NativeImage {
-  const iconPath = path.join(__dirname, '..', 'build', 'icon.png')
+  const iconPath = path.join(__dirname, '..', 'build', `${iconBaseName()}.png`)
   const img = nativeImage.createFromPath(iconPath)
   if (img.isEmpty()) {
     console.warn('Tray icon missing — run `pnpm icons` to generate build/icon.png')
