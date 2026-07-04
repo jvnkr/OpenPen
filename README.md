@@ -17,9 +17,11 @@ Get the latest Windows installer from [Releases](https://github.com/jvnkr/OpenPe
 - Recording friendly. Ink shows up in OBS and Zoom. The toolbar can stay hidden from recordings
 - Switch between draw mode and mouse mode with one hotkey. Your ink stays visible either way
 - Pen, highlighter, eraser, line, arrow, rectangle, ellipse, text, and drag to move objects
-- 8 preset colors plus a custom color picker. Adjust brush size with a slider, `[` `]`, or the mouse wheel
+- Fading ink for temporary annotations. Strokes fade out on their own, with an adjustable duration
+- 8 preset colors plus a custom color picker. Save your own swatches, pick a color from the screen, and adjust brush size with a slider, `[` `]`, or the mouse wheel
 - Unlimited undo and redo, plus clear screen
 - Whiteboard and blackboard modes
+- Hide or show ink without clearing it
 - Save a screenshot with your annotations to `Pictures\OpenPen\`
 - System tray with quick actions. Draggable toolbar that collapses to a mini pill
 - Auto-updates from GitHub Releases, with update status in Settings
@@ -37,7 +39,7 @@ Default global shortcuts are listed below. Change them in **Settings → Hotkeys
 | `Ctrl+Shift+1` … `Ctrl+Shift+9` | Pen, drag/move, highlighter, eraser, text, line, arrow, rectangle, ellipse |
 | `Ctrl+Shift+C` | Clear screen |
 | `Ctrl+Shift+U` | Undo |
-| `Ctrl+Shift+Z` or `Ctrl+Shift+Y` | Redo |
+| `Ctrl+Shift+Y` | Redo |
 | `Ctrl+Shift+S` | Save screenshot |
 | `Ctrl+Shift+W` / `Ctrl+Shift+B` | Whiteboard / blackboard |
 | `Ctrl+Shift+H` | Hide / show ink |
@@ -45,7 +47,11 @@ Default global shortcuts are listed below. Change them in **Settings → Hotkeys
 
 While drawing on the overlay, `[` and `]` (or the mouse wheel) adjust brush size. Hold **Shift** while drawing shapes to lock to squares, circles, or 45° lines.
 
+While ink is on screen, `Ctrl+Z` undoes and `Ctrl+Shift+Z` or `Ctrl+Y` redoes on the display under your cursor.
+
 Text tool: click to place, type, `Enter` to commit, `Shift+Enter` for a new line, `Esc` to cancel.
+
+Fading ink: open the timer button in the toolbar to turn it on and set how long strokes stay visible.
 
 ## Recording with OBS
 
