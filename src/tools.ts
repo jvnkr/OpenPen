@@ -20,10 +20,9 @@ export interface ToolDef {
   accel: number
 }
 
-// Array order is the toolbar's display order, and `accel` matches it: the
-// Ctrl+Shift+<n> number lines up with each tool's position in the column, so
-// Move/drag (the 2nd button) is Ctrl+Shift+2. Keep the two in step when adding
-// a tool, and mirror the numbers in electron/main.ts (TOOL_SHORTCUTS).
+// Array order is the toolbar's display order. The tools take the clean 1..9 run
+// (pen on Ctrl+Shift+1); mouse mode is Ctrl+Shift+0 ("back to nothing"). Keep
+// this in step and mirror the numbers in electron/main.ts (TOOL_SHORTCUTS).
 export const TOOLS: ToolDef[] = [
   { id: 'pen', name: 'Pen', accel: 1 },
   { id: 'drag', name: 'Drag / move', accel: 2 },

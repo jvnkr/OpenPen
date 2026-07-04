@@ -11,9 +11,9 @@ floating toolbar.
 ## Layout
 
 - `src/overlay/` – canvas ink engine and overlay window
-- `src/toolbar/` – tool palette and theme controls
-- `src/picker/` – color picker panel
-- `src/settings/` – settings window (appearance, recording, updates, about)
+- `src/toolbar/` – tool palette, color picker, and theme controls
+- `src/settings/` – settings window (appearance, hotkeys, recording, updates, about)
+- `src/hotkeys.ts` – hotkey definitions (mirrored in `electron/hotkeys.ts`)
 - `src/tools.ts` – tool definitions (single source of truth)
 - `src/ipc.ts` – typed renderer ↔ main IPC contract
 - `electron/main.ts` – main process, hotkeys, tray, auto-update
@@ -48,5 +48,5 @@ Avoid em dashes in text users see.
 ## Adding a tool or IPC channel
 
 1. Tool: `src/tools.ts`, icon in `src/toolbar/Toolbar.tsx`, draw logic in
-   `src/overlay/engine.ts`, shortcut in `electron/main.ts`.
+   `src/overlay/engine.ts`, hotkey in `src/hotkeys.ts` and `electron/hotkeys.ts`.
 2. IPC: `src/ipc.ts`, `electron/preload.ts`, handler in `electron/main.ts`.

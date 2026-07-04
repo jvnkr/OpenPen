@@ -24,15 +24,16 @@ Get the latest Windows installer from [Releases](https://github.com/jvnkr/OpenPe
 - System tray with quick actions. Draggable toolbar that collapses to a mini pill
 - Auto-updates from GitHub Releases, with update status in Settings
 - Light and dark themes
+- Customize global hotkeys in Settings. Reset per action or all at once, unbind shortcuts you do not need
 
 ## Hotkeys
 
-### Global
+Default global shortcuts are listed below. Change them in **Settings → Hotkeys**.
 
 | Hotkey | Action |
 | --- | --- |
 | `Ctrl+Shift+D` | Toggle draw / mouse mode |
-| `Ctrl+Shift+M` | Mouse mode |
+| `Ctrl+Shift+0` | Mouse mode |
 | `Ctrl+Shift+1` … `Ctrl+Shift+9` | Pen, drag/move, highlighter, eraser, text, line, arrow, rectangle, ellipse |
 | `Ctrl+Shift+C` | Clear screen |
 | `Ctrl+Shift+U` | Undo |

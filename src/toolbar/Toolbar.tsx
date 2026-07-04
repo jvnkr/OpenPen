@@ -16,6 +16,7 @@ import {
   Redo2,
   Settings,
   Square,
+  Timer,
   Trash2,
   Type,
   Undo2,
@@ -38,7 +39,9 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { applyDarkClass } from "@/lib/theme";
+import { ColorPicker } from "./ColorPicker";
 import { TOOLS as TOOL_DEFS, type Tool } from "@/tools";
+import { DEFAULT_HOTKEYS, hotkeysForAction, type HotkeyAction, type HotkeyMap } from "@/hotkeys";
 import type { Bg, HistoryState, ToolState } from "@/types";
 import "@/styles/globals.css";
 
@@ -75,6 +78,9 @@ const SIZE_PRESETS = [
   { label: "Large", value: 12 },
   { label: "Very large", value: 22 },
 ];
+
+// Fade-time quick picks, in seconds.
+const FADE_PRESETS = [1, 2, 5, 10];
 
 interface SavedState extends Partial<ToolState> {
   theme?: Theme;
@@ -141,6 +147,8 @@ export default function Toolbar(): React.JSX.Element {
   const [tool, setTool] = useState<Tool>(saved.tool ?? "pen");
   const [color, setColor] = useState(saved.color ?? "#ff3b30");
   const [size, setSize] = useState(saved.size ?? 6);
+  const [fade, setFade] = useState(saved.fade ?? false);
+  const [fadeMs, setFadeMs] = useState(saved.fadeMs ?? 2000);
   const [theme, setTheme] = useState<Theme>(saved.theme ?? "system");
   const [mode, setMode] = useState(false);
   const [bg, setBg] = useState<Bg>("none");
@@ -149,10 +157,12 @@ export default function Toolbar(): React.JSX.Element {
     canUndo: false,
     canRedo: false,
   });
-  const [pickerOpen, setPickerOpen] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [hotkeys, setHotkeys] = useState<HotkeyMap>(DEFAULT_HOTKEYS);
   const [screenshotting, setScreenshotting] = useState(false);
   const [sizeOpen, setSizeOpen] = useState(false);
+  const [fadeOpen, setFadeOpen] = useState(false);
+  const [colorOpen, setColorOpen] = useState(false);
   const [tipSide, setTipSide] = useState<"left" | "right">("left");
   const overPanel = useRef(false);
   const drag = useRef<{
@@ -182,25 +192,29 @@ export default function Toolbar(): React.JSX.Element {
       window.openpen.on("screenshotting", setScreenshotting),
       window.openpen.on("tooltip-side", setTipSide),
       window.openpen.on("set-theme", setTheme),
-      // The picker sends its chosen color here (via main); the toolbar owns the
-      // color state and rebroadcasts it to the overlays as tool-state.
-      window.openpen.on("set-color", setColor),
       // Apply the resolved theme when the main process broadcasts it — the same
       // signal every window applies on, so all their view-transition crossfades
       // start together instead of the toolbar lagging the settings window.
       window.openpen.on("theme", (t) => applyDarkClass(t === "dark")),
-      // Reflect the picker's open state so the custom-color button shows its
-      // active outline while the picker window is up.
-      window.openpen.on("picker-open", setPickerOpen),
+      // Drawing on the canvas closes any open toolbar menu (brush/fade/color),
+      // since a click out there can't reach this window's outside-press listener.
+      window.openpen.on("close-menus", () => {
+        setSizeOpen(false);
+        setFadeOpen(false);
+        setColorOpen(false);
+        overPanel.current = false;
+        window.openpen.send("toolbar-interactive", false);
+      }),
       window.openpen.on("update-badge", (s) => setUpdateAvailable(s.available)),
+      window.openpen.on("hotkeys", setHotkeys),
     ];
     window.openpen.send("toolbar-ready");
     return () => offs.forEach((off) => off());
   }, []);
 
   useEffect(() => {
-    window.openpen.send("tool-state", { tool, color, size });
-  }, [tool, color, size]);
+    window.openpen.send("tool-state", { tool, color, size, fade, fadeMs });
+  }, [tool, color, size, fade, fadeMs]);
 
   useEffect(() => {
     const apply = (): void => {
@@ -217,8 +231,8 @@ export default function Toolbar(): React.JSX.Element {
   }, [theme]);
 
   useEffect(() => {
-    localStorage.setItem("openpen", JSON.stringify({ tool, color, size, theme }));
-  }, [tool, color, size, theme]);
+    localStorage.setItem("openpen", JSON.stringify({ tool, color, size, fade, fadeMs, theme }));
+  }, [tool, color, size, fade, fadeMs, theme]);
 
   useEffect(() => {
     const fit = (): void => {
@@ -249,10 +263,10 @@ export default function Toolbar(): React.JSX.Element {
     e: React.PointerEvent<HTMLElement>,
   ): { x: number; y: number } => ({ x: e.screenX, y: e.screenY });
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
-    // The size popover's slider is portaled to the window body, so a press on it
-    // never reaches this handler — but never arm a toolbar drag while it's open,
-    // so dragging the slider can't turn into dragging the whole toolbar.
-    if (e.button !== 0 || sizeOpen) return;
+    // A popover's slider is portaled to the window body, so a press on it never
+    // reaches this handler — but never arm a toolbar drag while one is open, so
+    // dragging the slider can't turn into dragging the whole toolbar.
+    if (e.button !== 0 || sizeOpen || fadeOpen || colorOpen) return;
     drag.current = {
       pointerId: e.pointerId,
       startX: e.screenX,
@@ -262,7 +276,7 @@ export default function Toolbar(): React.JSX.Element {
     };
   };
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>): void => {
-    if (sizeOpen) return;
+    if (sizeOpen || fadeOpen || colorOpen) return;
     const d = drag.current;
     if (!d || d.pointerId !== e.pointerId) return;
     const dx = e.screenX - d.startX;
@@ -293,6 +307,9 @@ export default function Toolbar(): React.JSX.Element {
     drag.current = null;
   };
 
+  const hk = (action: HotkeyAction): string[] | undefined => hotkeysForAction(hotkeys, action);
+  const toolHk = (tool: Tool): string[] | undefined => hotkeysForAction(hotkeys, `tool:${tool}`);
+
   return (
     <TooltipProvider>
       <TipSideContext.Provider value={tipSide}>
@@ -310,7 +327,7 @@ export default function Toolbar(): React.JSX.Element {
           }}
           onMouseLeave={() => {
             overPanel.current = false;
-            syncInteractive(sizeOpen);
+            syncInteractive(sizeOpen || fadeOpen || colorOpen);
           }}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
@@ -318,7 +335,7 @@ export default function Toolbar(): React.JSX.Element {
           onPointerCancel={handlePointerUp}
           onClickCapture={handleClickCapture}
         >
-          <Tip label="Hide toolbar" keys={["Ctrl+Shift+T"]}>
+          <Tip label="Hide toolbar" keys={hk("toggleToolbar")}>
             <Button
               variant="ghost"
               size="icon"
@@ -332,7 +349,7 @@ export default function Toolbar(): React.JSX.Element {
 
           <Separator className="my-0.5 shrink-0" />
 
-          <Tip label="Mouse mode" keys={["Ctrl+Shift+M"]}>
+          <Tip label="Mouse mode" keys={hk("mouseMode")}>
             <Button
               variant={!mode ? "default" : "ghost"}
               size="icon"
@@ -345,13 +362,13 @@ export default function Toolbar(): React.JSX.Element {
           </Tip>
 
           <div className="flex shrink-0 flex-col gap-0.5">
-            {TOOL_DEFS.map(({ id, name, accel }) => {
+            {TOOL_DEFS.map(({ id, name }) => {
               const Icon = TOOL_ICONS[id];
               return (
                 <Tip
                   key={id}
                   label={name}
-                  keys={[`Ctrl+Shift+${accel}`]}
+                  keys={toolHk(id)}
                 >
                   <Button
                     variant="ghost"
@@ -444,22 +461,128 @@ export default function Toolbar(): React.JSX.Element {
             </PopoverContent>
           </Popover>
 
-          <Tip label="Custom color">
-            <button
-              aria-label="Open color picker"
+          <Popover
+            open={colorOpen}
+            onOpenChange={(open) => {
+              setColorOpen(open);
+              syncInteractive(open);
+            }}
+          >
+            <PopoverTrigger
+              aria-label="Custom color"
               className={cn(
                 "h-7 w-full shrink-0 cursor-pointer rounded-sm border border-border transition-[border-color] duration-150 ease-out hover:border-foreground/40",
-                pickerOpen && !screenshotting && "border-foreground/50",
+                colorOpen && !screenshotting && "border-foreground/50",
               )}
               style={{ background: color }}
-              onClick={() => window.openpen.send("toggle-picker")}
             />
-          </Tip>
+            <PopoverContent
+              side={tipSide}
+              sideOffset={8}
+              className="w-48"
+              aria-label="Custom color"
+            >
+              <ColorPicker color={color} onChange={setColor} />
+            </PopoverContent>
+          </Popover>
+
+          <Popover
+            open={fadeOpen}
+            onOpenChange={(open) => {
+              setFadeOpen(open);
+              syncInteractive(open);
+            }}
+          >
+            <PopoverTrigger
+              aria-label="Fading ink"
+              className={cn(
+                "flex h-7 w-full shrink-0 cursor-pointer items-center justify-center rounded-sm transition-colors duration-150 ease-out [&_svg]:size-3.5",
+                fade && !screenshotting
+                  ? "bg-primary text-primary-foreground"
+                  : "text-foreground hover:bg-muted",
+              )}
+            >
+              <Timer />
+            </PopoverTrigger>
+            <PopoverContent
+              side={tipSide}
+              sideOffset={8}
+              className="w-48"
+              aria-label="Fading ink"
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium text-foreground">
+                  Fading ink
+                </span>
+                <button
+                  role="switch"
+                  aria-checked={fade}
+                  aria-label="Toggle fading ink"
+                  onClick={() => setFade((f) => !f)}
+                  className={cn(
+                    "relative h-4 w-7 shrink-0 cursor-pointer rounded-full transition-colors duration-150 ease-out",
+                    fade ? "bg-primary" : "bg-muted",
+                  )}
+                >
+                  <span
+                    className={cn(
+                      "absolute top-0.5 size-3 rounded-full bg-white shadow-sm transition-[left] duration-150 ease-out",
+                      fade ? "left-3.5" : "left-0.5",
+                    )}
+                  />
+                </button>
+              </div>
+              <div
+                className={cn(
+                  "mt-3 transition-opacity duration-150",
+                  !fade && "opacity-50",
+                )}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground">Fade time</span>
+                  <span className="text-xs tabular-nums text-foreground">
+                    {(fadeMs / 1000).toFixed(1)}s
+                  </span>
+                </div>
+                <Slider
+                  min={0.5}
+                  max={10}
+                  step={0.1}
+                  value={[fadeMs / 1000]}
+                  onValueChange={(v) =>
+                    setFadeMs(
+                      Math.round((Array.isArray(v) ? (v[0] ?? 2) : v) * 1000),
+                    )
+                  }
+                  aria-label="Fade time"
+                  className="mt-2"
+                />
+                <div className="mt-3 grid grid-cols-4 gap-1">
+                  {FADE_PRESETS.map((sec) => (
+                    <button
+                      key={sec}
+                      aria-label={`${sec} seconds`}
+                      aria-pressed={fadeMs === sec * 1000}
+                      className={cn(
+                        "h-7 rounded-md border text-xs tabular-nums transition-colors duration-150 ease-out",
+                        fadeMs === sec * 1000
+                          ? "border-transparent bg-accent text-accent-foreground"
+                          : "border-border bg-secondary/50 text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                      )}
+                      onClick={() => setFadeMs(sec * 1000)}
+                    >
+                      {sec}s
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </PopoverContent>
+          </Popover>
 
           <Separator className="my-0.5 shrink-0" />
 
           <div className="flex shrink-0 flex-col gap-0.5">
-            <Tip label="Whiteboard" keys={["Ctrl+Shift+W"]}>
+            <Tip label="Whiteboard" keys={hk("whiteboard")}>
               <Button
                 variant="ghost"
                 size="icon"
@@ -476,7 +599,7 @@ export default function Toolbar(): React.JSX.Element {
                 <Presentation />
               </Button>
             </Tip>
-            <Tip label="Blackboard" keys={["Ctrl+Shift+B"]}>
+            <Tip label="Blackboard" keys={hk("blackboard")}>
               <Button
                 variant="ghost"
                 size="icon"
@@ -498,7 +621,7 @@ export default function Toolbar(): React.JSX.Element {
           <Separator className="my-0.5 shrink-0" />
 
           <div className="flex shrink-0 flex-col gap-0.5">
-            <Tip label="Undo" keys={["Ctrl+Z"]}>
+            <Tip label="Undo" keys={hk("undo")}>
               <Button
                 variant="ghost"
                 className="h-7 w-full rounded-sm px-0 [&_svg]:size-3.5"
@@ -509,7 +632,7 @@ export default function Toolbar(): React.JSX.Element {
                 <Undo2 />
               </Button>
             </Tip>
-            <Tip label="Redo" keys={["Ctrl+Shift+Z"]}>
+            <Tip label="Redo" keys={hk("redo")}>
               <Button
                 variant="ghost"
                 className="h-7 w-full rounded-sm px-0 [&_svg]:size-3.5"
@@ -520,7 +643,7 @@ export default function Toolbar(): React.JSX.Element {
                 <Redo2 />
               </Button>
             </Tip>
-            <Tip label="Clear screen" keys={["Ctrl+Shift+C"]}>
+            <Tip label="Clear screen" keys={hk("clear")}>
               <Button
                 variant="destructive"
                 className="h-7 w-full rounded-sm px-0 [&_svg]:size-3.5"
@@ -531,7 +654,7 @@ export default function Toolbar(): React.JSX.Element {
                 <Trash2 />
               </Button>
             </Tip>
-            <Tip label="Save screenshot" keys={["Ctrl+Shift+S"]}>
+            <Tip label="Save screenshot" keys={hk("screenshot")}>
               <Button
                 variant="ghost"
                 className="h-7 w-full rounded-sm px-0 [&_svg]:size-3.5"

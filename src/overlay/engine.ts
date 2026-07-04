@@ -4,7 +4,10 @@ import type { HistoryState, Tool } from '@/types'
 const TAU = Math.PI * 2
 const clamp = (v: number, a: number, b: number): number => Math.min(b, Math.max(a, v))
 
-export interface Point { x: number; y: number }
+// `pressure` (0..1) comes straight from the pointer event; perfect-freehand
+// reads it by that key. It's only honoured when the stroke was drawn with a real
+// pressure device (see StrokeOp.realPressure), otherwise pressure is simulated.
+export interface Point { x: number; y: number; pressure?: number }
 
 type InkKind = 'pen' | 'highlighter'
 type ShapeKind = 'line' | 'arrow' | 'rect' | 'ellipse'
@@ -15,6 +18,9 @@ interface StrokeOp {
   color: string
   size: number
   points: Point[]
+  // True when a pressure-capable device (pen/tablet) drew this, so the outline
+  // uses the recorded pressure instead of the velocity-simulated fallback.
+  realPressure?: boolean
 }
 interface ShapeOp {
   kind: ShapeKind
@@ -58,9 +64,22 @@ const toolWidth = (tool: Tool, size: number): number =>
 // perfect-freehand options (the excalidraw/tldraw approach): streamline eats
 // input jitter, smoothing rounds the outline, thinning tapers with speed.
 const PEN_FREEHAND = { thinning: 0.5, smoothing: 0.5, streamline: 0.5, simulatePressure: true, last: true }
+// Same pen, but honouring the real pressure recorded from a tablet/pen instead
+// of faking it from velocity.
+const PEN_REAL = { ...PEN_FREEHAND, simulatePressure: false }
 // Highlighter stays a uniform-width marker — no taper, no fake pressure.
 const HL_FREEHAND = { thinning: 0, smoothing: 0.5, streamline: 0.5, simulatePressure: false, last: true }
 const ERASER_HOVER_ALPHA = 0.45
+
+// Fading ink: over the chosen total lifetime, stay fully opaque for the first
+// quarter, then fade to nothing over the rest.
+const FADE_HOLD_FRAC = 0.25
+function fadeAlpha (now: number, born: number, dur: number): number {
+  const t = now - born
+  const hold = dur * FADE_HOLD_FRAC
+  if (t <= hold) return 1
+  return Math.max(0, 1 - (t - hold) / (dur - hold))
+}
 
 // Closed smooth path through a perfect-freehand outline polygon (midpoint
 // quadratics, per the library's reference renderer).
@@ -137,16 +156,19 @@ function drawArrow (ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: n
   ctx.fill()
 }
 
-function renderOp (ctx: CanvasRenderingContext2D, op: Op): void {
+// `alpha` scales the op's opacity (1 = normal). Used for the eraser-hover dim
+// and the fading-ink effect, which both need to draw an op more faintly.
+function renderOp (ctx: CanvasRenderingContext2D, op: Op, alpha = 1): void {
   ctx.save()
   ctx.lineJoin = 'round'
   ctx.lineCap = 'round'
+  ctx.globalAlpha = alpha
   switch (op.kind) {
     case 'pen':
-      fillFreehand(ctx, op.points, op.color, op.size, PEN_FREEHAND)
+      fillFreehand(ctx, op.points, op.color, op.size, op.realPressure ? PEN_REAL : PEN_FREEHAND)
       break
     case 'highlighter':
-      ctx.globalAlpha = 0.35
+      ctx.globalAlpha = 0.35 * alpha
       fillFreehand(ctx, op.points, op.color, toolWidth('highlighter', op.size), HL_FREEHAND)
       break
     case 'line':
@@ -340,11 +362,14 @@ export class InkDoc {
 }
 
 export class Engine {
-  cur: LiveOp | null = null
+  // In-progress strokes/shapes, keyed by pointer id so several fingers (or a
+  // pen plus a finger) can draw at once — multi-touch. Erasing and dragging stay
+  // single-gesture; the pointer that started them owns them until release.
+  private readonly live = new Map<number, LiveOp>()
 
   // Everything is presented on ONE visible canvas: committed ink lives on an
   // offscreen buffer, and each frame the screen is repainted as buffer + the
-  // in-progress op (how Excalidraw/tldraw render). Committing on pointer up
+  // in-progress ops (how Excalidraw/tldraw render). Committing on pointer up
   // just moves the op into the buffer and repaints — pixel-identical output on
   // a single surface, so there is no cross-canvas compositor handoff to blink.
   private readonly screenC: HTMLCanvasElement
@@ -355,10 +380,13 @@ export class Engine {
   private readonly doc = new InkDoc()
   private dpr = 1
   private erasing = false
+  private erasePointer = -1
   private eraseSize = 0
   private pendingErase = new Set<number>()
-  // In-progress drag: the picked object's id and how far it has moved so far.
+  // In-progress drag: the owning pointer, picked object's id, and how far it has
+  // moved so far.
   private dragging = false
+  private dragPointer = -1
   private dragId = -1
   private dragStartX = 0
   private dragStartY = 0
@@ -366,6 +394,13 @@ export class Engine {
   private dragDy = 0
   private raf = 0
   private replayRaf = 0
+  // Fading ink (Epic-Pen style): when on, finished strokes/shapes aren't
+  // committed to the undo document — they go here and fade out on their own, so
+  // they're temporary annotations that never need clearing.
+  private fadeMode = false
+  private fadeDur = 2000
+  private fading: Array<{ op: LiveOp; born: number; dur: number }> = []
+  private fadeRaf = 0
   // Brush-size preview: a ring drawn on the canvas at the pointer. Custom OS
   // cursors flicker on this transparent always-on-top window (Windows flashes
   // the default arrow during movement), so the size feedback lives in-canvas —
@@ -400,10 +435,24 @@ export class Engine {
     this.replay()
   }
 
-  // True while a pointer interaction is live (drawing, erasing or dragging), so
-  // the overlay knows to keep forwarding move events even when `cur` is null.
+  // True while any pointer interaction is live (drawing, erasing or dragging).
   get active (): boolean {
-    return this.cur !== null || this.erasing || this.dragging
+    return this.live.size > 0 || this.erasing || this.dragging
+  }
+
+  // Whether a specific pointer has a live gesture, so the overlay only forwards
+  // that pointer's moves while they matter.
+  hasGesture (pointerId: number): boolean {
+    return this.live.has(pointerId) ||
+      (this.erasing && this.erasePointer === pointerId) ||
+      (this.dragging && this.dragPointer === pointerId)
+  }
+
+  // Toggle Epic-Pen-style fading ink and set how long a stroke lives (ms) before
+  // it's fully gone. Turning it off leaves anything already fading to finish.
+  setFadeMode (on: boolean, durMs = this.fadeDur): void {
+    this.fadeMode = on
+    this.fadeDur = durMs
   }
 
   // Turn the in-canvas size ring on (pen/highlighter) or off (null). The ring
@@ -454,41 +503,45 @@ export class Engine {
     if (this.eraserHover && !this.erasing && !this.dragging) this.syncEraserHover()
   }
 
-  begin (tool: Exclude<Tool, 'text'>, color: string, size: number, x: number, y: number, shift: boolean): void {
+  begin (
+    pointerId: number, tool: Exclude<Tool, 'text'>, color: string, size: number,
+    x: number, y: number, shift: boolean, pressure = 0.5, realPressure = false,
+  ): void {
     // Dragging is driven through beginDrag, not begin; guard so a stray call
     // can never mint a bogus shape op with kind 'drag'.
     if (tool === 'drag') return
     if (tool === 'eraser') {
-      // The eraser deletes whole objects; a drag can clear several at once.
-      this.cur = null
+      // The eraser deletes whole objects; a drag can clear several at once. Only
+      // one erase gesture runs at a time — extra fingers are ignored.
+      if (this.erasing) return
       this.erasing = true
+      this.erasePointer = pointerId
       this.eraseSize = size
       this.hoverEraseId = -1
       this.pendingErase = new Set()
       this.eraseAt(x, y)
       return
     }
-    if (tool === 'pen' || tool === 'highlighter') {
-      this.cur = { kind: tool, id: this.doc.newId(), color, size, points: [{ x, y }] }
-    } else {
-      this.cur = { kind: tool, id: this.doc.newId(), color, size, x0: x, y0: y, x1: x, y1: y, shift }
-    }
+    const op: LiveOp = (tool === 'pen' || tool === 'highlighter')
+      ? { kind: tool, id: this.doc.newId(), color, size, points: [{ x, y, pressure }], realPressure: realPressure && tool === 'pen' }
+      : { kind: tool, id: this.doc.newId(), color, size, x0: x, y0: y, x1: x, y1: y, shift }
+    this.live.set(pointerId, op)
     this.repaint()
   }
 
-  move (pts: Point[], shift: boolean): void {
-    if (this.dragging) {
+  move (pointerId: number, pts: Point[], shift: boolean): void {
+    if (this.dragging && this.dragPointer === pointerId) {
       const p = pts[pts.length - 1]
       this.dragDx = p.x - this.dragStartX
       this.dragDy = p.y - this.dragStartY
       this.scheduleReplay()
       return
     }
-    if (this.erasing) {
+    if (this.erasing && this.erasePointer === pointerId) {
       for (const p of pts) this.eraseAt(p.x, p.y)
       return
     }
-    const c = this.cur
+    const c = this.live.get(pointerId)
     if (!c) return
     if ('points' in c) {
       for (const p of pts) c.points.push(p)
@@ -502,9 +555,10 @@ export class Engine {
     this.scheduleRepaint()
   }
 
-  end (): void {
-    if (this.dragging) {
+  end (pointerId: number): void {
+    if (this.dragging && this.dragPointer === pointerId) {
       this.dragging = false
+      this.dragPointer = -1
       // A no-op drag (a click that never moved) records nothing to undo.
       if (this.dragId >= 0 && (this.dragDx !== 0 || this.dragDy !== 0)) {
         this.push({ kind: 'move', id: this.dragId, dx: this.dragDx, dy: this.dragDy })
@@ -515,17 +569,25 @@ export class Engine {
       this.replay()
       return
     }
-    if (this.erasing) {
+    if (this.erasing && this.erasePointer === pointerId) {
       this.erasing = false
+      this.erasePointer = -1
       // Bundle everything this drag removed into one erase op → one undo.
       if (this.pendingErase.size > 0) this.push({ kind: 'erase', ids: [...this.pendingErase] })
       this.pendingErase = new Set()
       if (this.eraserHover && this.hasPointer) this.syncEraserHover()
       return
     }
-    const c = this.cur
+    const c = this.live.get(pointerId)
     if (!c) return
-    this.cur = null
+    this.live.delete(pointerId)
+    if (this.fadeMode) {
+      // Temporary ink: never touches the undo document, just fades out.
+      this.fading.push({ op: c, born: performance.now(), dur: this.fadeDur })
+      this.startFade()
+      this.repaint()
+      return
+    }
     // The op moves from "in progress" to the committed buffer; the next repaint
     // draws the exact same pixels from the buffer instead, so nothing changes
     // on screen — no flicker, no pop.
@@ -543,10 +605,12 @@ export class Engine {
 
   // Pick the topmost object under the point and start dragging it. Returns false
   // (and starts nothing) when the point isn't on any object, so a miss is inert.
-  beginDrag (x: number, y: number): boolean {
+  beginDrag (pointerId: number, x: number, y: number): boolean {
+    if (this.dragging) return false
     const id = this.pickAt(x, y)
     if (id < 0) return false
     this.dragging = true
+    this.dragPointer = pointerId
     this.dragId = id
     this.dragStartX = x
     this.dragStartY = y
@@ -556,7 +620,13 @@ export class Engine {
   }
 
   clearInk (): void {
-    if (!this.doc.clearable) return
+    // Clear wipes the screen, including any ink still fading.
+    const hadFading = this.fading.length > 0
+    this.fading = []
+    if (!this.doc.clearable) {
+      if (hadFading) this.repaint()
+      return
+    }
     this.push({ kind: 'clear' })
     this.replay()
   }
@@ -591,6 +661,21 @@ export class Engine {
     })
   }
 
+  // Drive the fading-ink animation: repaint every frame while any temporary
+  // stroke is still visible, dropping strokes once fully faded, then stop.
+  private startFade (): void {
+    if (this.fadeRaf !== 0) return
+    this.fadeRaf = requestAnimationFrame(this.tickFade)
+  }
+
+  private tickFade = (): void => {
+    this.fadeRaf = 0
+    const now = performance.now()
+    this.fading = this.fading.filter(f => now - f.born < f.dur)
+    this.repaint()
+    if (this.fading.length > 0) this.startFade()
+  }
+
   // Full repaint: committed buffer blitted first, then the in-progress op
   // stroked on top with the same renderOp used at commit time, so the live
   // preview and the final ink are always pixel-identical. The brush-size ring
@@ -604,9 +689,14 @@ export class Engine {
     s.setTransform(1, 0, 0, 1, 0, 0)
     s.clearRect(0, 0, this.screenC.width, this.screenC.height)
     s.drawImage(this.baseC, 0, 0)
-    if (this.cur) {
-      s.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
-      renderOp(s, this.cur)
+    s.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
+    for (const op of this.live.values()) renderOp(s, op)
+    if (this.fading.length > 0) {
+      const now = performance.now()
+      for (const f of this.fading) {
+        const a = fadeAlpha(now, f.born, f.dur)
+        if (a > 0) renderOp(s, f.op, a)
+      }
     }
     if (this.previewTool && this.hasPointer) {
       // Same look the old cursor bitmap had: translucent fill of the brush
@@ -683,26 +773,15 @@ export class Engine {
   }
 
   private eraseAt (x: number, y: number): void {
-    // Object erasing is a point pick, so keep a generous floor regardless of the
-    // eraser size — it's meant to be easy to land on a stroke, not pixel-precise.
+    // Erase only the topmost object under the point — the same one the hover
+    // highlights (pickAt, same generous tolerance floor so it's easy to land on
+    // a stroke). pickAt skips already-pending ids, so dragging the eraser across
+    // a stack still peels them off one at a time as each becomes topmost.
     const tol = Math.max(toolWidth('eraser', this.eraseSize) / 2, 12)
-    const ops = this.doc.all
-    const hidden = this.doc.hiddenIds(this.pendingErase)
-    const offs = this.doc.offsets(this.liveDrag())
-    const start = this.doc.activeStart()
-    let changed = false
-    for (let i = ops.length - 1; i >= start; i--) {
-      const op = ops[i]
-      if (op.kind === 'erase' || op.kind === 'clear' || op.kind === 'move') continue
-      if (hidden.has(op.id)) continue
-      const o = offs.get(op.id)
-      if (opHit(op, x - (o?.x ?? 0), y - (o?.y ?? 0), tol, this.base)) {
-        this.pendingErase.add(op.id)
-        hidden.add(op.id)
-        changed = true
-      }
-    }
-    if (changed) this.replay()
+    const id = this.pickAt(x, y, tol)
+    if (id < 0) return
+    this.pendingErase.add(id)
+    this.replay()
   }
 
   private replay (): void {
@@ -716,20 +795,14 @@ export class Engine {
       if (op.kind === 'erase' || op.kind === 'clear' || op.kind === 'move') continue
       if (hidden.has(op.id)) continue
       const o = offs.get(op.id)
-      const hovered = op.id === this.hoverEraseId && !this.erasing
+      const alpha = op.id === this.hoverEraseId && !this.erasing ? ERASER_HOVER_ALPHA : 1
       if (o) {
         this.base.save()
         this.base.translate(o.x, o.y)
-        if (hovered) this.base.globalAlpha = ERASER_HOVER_ALPHA
-        renderOp(this.base, op)
-        this.base.restore()
-      } else if (hovered) {
-        this.base.save()
-        this.base.globalAlpha = ERASER_HOVER_ALPHA
-        renderOp(this.base, op)
+        renderOp(this.base, op, alpha)
         this.base.restore()
       } else {
-        renderOp(this.base, op)
+        renderOp(this.base, op, alpha)
       }
     }
     this.repaint()

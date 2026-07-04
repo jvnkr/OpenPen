@@ -10,6 +10,11 @@ export interface ToolState {
   tool: Tool
   color: string
   size: number
+  // When true, freehand strokes and shapes fade out and vanish shortly after
+  // you draw them (temporary annotations that never need clearing).
+  fade?: boolean
+  // How long fading ink lives, in milliseconds, before it's fully gone.
+  fadeMs?: number
 }
 
 export interface HistoryState {

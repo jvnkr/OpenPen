@@ -154,10 +154,14 @@ export default function Overlay (): React.JSX.Element {
     } else {
       eng.setEraserHover(false)
     }
+    eng.setFadeMode(Boolean(tool.fade), tool.fadeMs ?? 2000)
   }, [mode, tool, eyedrop])
 
   const onDown = (ev: React.PointerEvent<HTMLCanvasElement>): void => {
     if (ev.button !== 0) return
+    // Drawing out here can't reach the toolbar's outside-press listener, so tell
+    // it to close any open menu (brush/fade/color).
+    window.openpen.send('draw-start')
     if (latest.current.edit) { commitEditRef.current(false); return }
     if (tool.tool === 'text') {
       setEdit({ x: ev.clientX, y: ev.clientY })
@@ -165,28 +169,34 @@ export default function Overlay (): React.JSX.Element {
     }
     ev.currentTarget.setPointerCapture(ev.pointerId)
     if (tool.tool === 'drag') {
-      engRef.current?.beginDrag(ev.clientX, ev.clientY)
+      engRef.current?.beginDrag(ev.pointerId, ev.clientX, ev.clientY)
       return
     }
-    engRef.current?.begin(tool.tool, tool.color, tool.size, ev.clientX, ev.clientY, ev.shiftKey)
+    // Real pressure only from pen/tablet devices; mouse/touch fall back to the
+    // velocity-simulated taper. Each pointer id draws its own stroke (multi-touch).
+    engRef.current?.begin(
+      ev.pointerId, tool.tool, tool.color, tool.size,
+      ev.clientX, ev.clientY, ev.shiftKey, ev.pressure, ev.pointerType === 'pen',
+    )
   }
 
   const onMove = (ev: React.PointerEvent<HTMLCanvasElement>): void => {
     const eng = engRef.current
     if (!eng) return
     eng.setPointer(ev.clientX, ev.clientY)
-    if (!eng.active) return
+    if (!eng.hasGesture(ev.pointerId)) return
     const native = ev.nativeEvent
     const events = typeof native.getCoalescedEvents === 'function'
       ? native.getCoalescedEvents()
       : [native]
     const pts: Point[] = events.length
-      ? events.map(e => ({ x: e.clientX, y: e.clientY }))
-      : [{ x: ev.clientX, y: ev.clientY }]
-    eng.move(pts, ev.shiftKey)
+      ? events.map(e => ({ x: e.clientX, y: e.clientY, pressure: e.pressure }))
+      : [{ x: ev.clientX, y: ev.clientY, pressure: ev.pressure }]
+    eng.move(ev.pointerId, pts, ev.shiftKey)
   }
 
-  const onUp = (): void => engRef.current?.end()
+  const onUp = (ev: React.PointerEvent<HTMLCanvasElement>): void =>
+    engRef.current?.end(ev.pointerId)
 
   const onWheel = (ev: React.WheelEvent<HTMLCanvasElement>): void => {
     // Feed the pointer position too: a stationary wheel-resize must draw the

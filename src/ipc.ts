@@ -7,6 +7,7 @@
 // (it can't import this module), so it mirrors these channel names in its own
 // ipcMain handlers — the strings are the shared vocabulary across the seam.
 
+import type { HotkeyAction, HotkeyMap } from './hotkeys'
 import type { Bg, HistoryState, ToolState } from './types'
 import type { Tool } from './tools'
 import type { EyeDropData } from './overlay/EyeDropper'
@@ -16,6 +17,8 @@ export type UpdateStatus = 'idle' | 'checking' | 'downloading' | 'ready' | 'upto
 export interface Point2 { x: number; y: number }
 export interface SettingsState {
   protectUi: boolean
+  hotkeys: HotkeyMap
+  hotkeyError: string | null
   isDev: boolean
   version: string
   canUpdate: boolean
@@ -29,7 +32,6 @@ export interface UpdateBadgeState { available: boolean }
 export interface SendMap {
   'overlay-ready': void
   'toolbar-ready': void
-  'picker-ready': void
   'settings-ready': void
   'overlay-cursor-ready': void
   'tool-state': ToolState
@@ -39,11 +41,14 @@ export interface SendMap {
   'pick-tool': Tool | 'mouse'
   'adjust-size': number
   'set-bg': Bg
-  'set-color': string
   'theme': string
   'set-theme': ThemePref
   'set-protect-ui': boolean
+  'set-hotkey': { action: HotkeyAction; accelerator: string; force?: boolean }
+  'reset-hotkeys': void
+  'hotkey-capture': boolean
   'text-editing': boolean
+  'draw-start': void
   'toolbar-drag-start': Point2
   'toolbar-drag-move': Point2
   'toolbar-drag-end': void
@@ -51,13 +56,11 @@ export interface SendMap {
   'toolbar-interactive': boolean
   'toggle-hide': void
   'toggle-toolbar': void
-  'toggle-picker': void
   'open-settings': void
   'screenshot': void
   'eyedrop-start': void
   'eyedrop-pick': string
   'eyedrop-cancel': void
-  'picker-hidden': void
   'check-for-updates': void
   'install-update': void
   'quit': void
@@ -73,16 +76,14 @@ export interface RecvMap {
   'pick-tool': Tool | 'mouse'
   'adjust-size': number
   'hidden': boolean
-  'color': string
   'theme': string
-  'picker-open': boolean
-  'set-color': string
+  'close-menus': void
   'screenshotting': boolean
   'tooltip-side': 'left' | 'right'
   'set-theme': ThemePref
   'settings-state': SettingsState
+  'hotkeys': HotkeyMap
   'update-badge': UpdateBadgeState
-  'picker-visible': boolean
   'eyedrop': EyeDropData | null
 }
 

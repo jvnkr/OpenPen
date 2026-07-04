@@ -28,7 +28,6 @@ export default defineConfig({
       input: {
         overlay: resolve(__dirname, 'overlay.html'),
         toolbar: resolve(__dirname, 'toolbar.html'),
-        picker: resolve(__dirname, 'picker.html'),
         settings: resolve(__dirname, 'settings.html')
       }
     }

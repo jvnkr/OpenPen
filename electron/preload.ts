@@ -1,21 +1,22 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 
 const SEND = new Set([
-  'overlay-ready', 'toolbar-ready', 'picker-ready', 'tool-state', 'set-mode',
+  'overlay-ready', 'toolbar-ready', 'tool-state', 'set-mode',
   'cmd', 'history', 'pick-tool', 'adjust-size', 'set-bg', 'screenshot',
-  'toggle-hide', 'toggle-toolbar', 'toggle-picker', 'set-color', 'theme', 'quit',
-  'toolbar-drag-start', 'toolbar-drag-move',
+  'toggle-hide', 'toggle-toolbar', 'theme', 'quit',
+  'draw-start', 'toolbar-drag-start', 'toolbar-drag-move',
   'toolbar-drag-end', 'toolbar-fit-height', 'toolbar-interactive',
   'overlay-cursor-ready', 'text-editing',
-  'open-settings', 'settings-ready', 'set-theme', 'set-protect-ui', 'picker-hidden',
+  'open-settings', 'settings-ready', 'set-theme', 'set-protect-ui',
+  'set-hotkey', 'reset-hotkeys', 'hotkey-capture',
   'check-for-updates', 'install-update',
   'eyedrop-start', 'eyedrop-pick', 'eyedrop-cancel'
 ])
 const ON = new Set([
   'tool-state', 'mode', 'bg', 'cmd', 'history',
   'pick-tool', 'adjust-size', 'hidden',
-  'color', 'theme', 'picker-open', 'set-color', 'screenshotting',
-  'tooltip-side', 'set-theme', 'settings-state', 'update-badge', 'picker-visible', 'eyedrop'
+  'theme', 'close-menus', 'screenshotting',
+  'tooltip-side', 'set-theme', 'settings-state', 'hotkeys', 'update-badge', 'eyedrop'
 ])
 
 contextBridge.exposeInMainWorld('openpen', {

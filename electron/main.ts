@@ -6,6 +6,12 @@ import {
 import path from 'node:path'
 import fs from 'node:fs'
 import { autoUpdater } from 'electron-updater'
+import {
+  DEFAULT_HOTKEYS, HOTKEY_ACTIONS, mergeHotkeys,
+  findHotkeyConflict, isValidAccelerator, isHotkeyBound,
+  UNBOUND_HOTKEY,
+  type HotkeyAction, type HotkeyMap
+} from './hotkeys.js'
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL
 const IS_DEV = Boolean(DEV_URL)
@@ -14,7 +20,7 @@ type Bg = 'none' | 'white' | 'black'
 interface ToolState { tool: string; color: string; size: number }
 interface AppState { mode: boolean; bg: Bg; hidden: boolean; toolState: ToolState | null }
 interface HistoryState { canUndo: boolean; canRedo: boolean }
-interface Settings { protectUi: boolean }
+interface Settings { protectUi: boolean; hotkeys?: Partial<HotkeyMap> }
 
 // One overlay per display, keyed by display id.
 const overlays = new Map<number, BrowserWindow>()
@@ -24,26 +30,18 @@ let eyedropCapturing = false
 // Per-overlay history, keyed by webContents id; aggregated for the toolbar.
 const overlayHistory = new Map<number, HistoryState>()
 let toolbar: BrowserWindow | null = null
-let picker: BrowserWindow | null = null
 let settingsWin: BrowserWindow | null = null
 let tray: Tray | null = null
 // Last resolved theme the toolbar broadcast, so lazily-created windows (the
 // settings dialog) can paint the right background before their JS runs.
 let resolvedTheme: 'light' | 'dark' = 'light'
-// Desired picker visibility. The window is hidden only after the renderer's
-// framer-motion exit animation reports done ('picker-hidden'); this flag lets a
-// re-open cancel that pending hide.
-let pickerShouldShow = false
 let toolbarDrag:
   | { startX: number; startY: number; winX: number; winY: number }
   | null = null
 let mouseModeFallback: NodeJS.Timeout | null = null
 
-const PICKER_W = 232
-// Tall enough for the color area, the hex input row and the saved-swatches grid.
-const PICKER_H = 372
 const SETTINGS_W = 640
-const SETTINGS_H = 460
+const SETTINGS_H = 520
 // The visible palette is TOOLBAR_PANEL_W wide and sits centred in the window,
 // flanked by a transparent gutter on each side. Tooltips (which would otherwise
 // be clipped by the window) render into whichever gutter has room on the actual
@@ -56,22 +54,40 @@ const TOOLBAR_H = 720
 // Single source of truth for app-wide state, mirrored to the renderers.
 const state: AppState = { mode: false, bg: 'none', hidden: false, toolState: null }
 
-// Persisted main-process settings. protectUi excludes the toolbar/picker from
-// screen capture (WDA_EXCLUDEFROMCAPTURE) so OBS recordings and screenshots
-// show ink but not the UI.
+// Persisted main-process settings. protectUi excludes the toolbar from screen
+// capture (WDA_EXCLUDEFROMCAPTURE) so OBS recordings and screenshots show ink
+// but not the UI.
 const settings: Settings = { protectUi: !IS_DEV }
+let hotkeys: HotkeyMap = { ...DEFAULT_HOTKEYS }
+let hotkeyError: string | null = null
 const settingsFile = (): string => path.join(app.getPath('userData'), 'settings.json')
+
+function sanitizeHotkeys (partial?: Partial<HotkeyMap>): Partial<HotkeyMap> {
+  if (!partial) return {}
+  const out: Partial<HotkeyMap> = {}
+  for (const action of HOTKEY_ACTIONS) {
+    const accel = partial[action]
+    if (typeof accel !== 'string') continue
+    if (accel === UNBOUND_HOTKEY || isValidAccelerator(accel)) out[action] = accel
+  }
+  return out
+}
 
 function loadSettings (): void {
   try {
-    Object.assign(settings, JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) as Partial<Settings>)
+    const raw = JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) as Partial<Settings>
+    Object.assign(settings, { protectUi: raw.protectUi })
+    hotkeys = mergeHotkeys(sanitizeHotkeys(raw.hotkeys))
   } catch { /* first run */ }
   if (IS_DEV) settings.protectUi = false
 }
 
 function saveSettings (): void {
   try {
-    fs.writeFileSync(settingsFile(), JSON.stringify(settings))
+    fs.writeFileSync(settingsFile(), JSON.stringify({
+      protectUi: settings.protectUi,
+      hotkeys: hotkeys
+    }))
   } catch (err) {
     console.error('failed to save settings', err)
   }
@@ -79,7 +95,6 @@ function saveSettings (): void {
 
 function applyUiCaptureProtection (): void {
   toolbar?.setContentProtection(!IS_DEV && settings.protectUi)
-  picker?.setContentProtection(!IS_DEV && settings.protectUi)
   settingsWin?.setContentProtection(!IS_DEV && settings.protectUi)
 }
 
@@ -96,11 +111,10 @@ const broadcast = (ch: string, data?: unknown): void => {
 
 // Raising the overlays (draw-mode entry, text-edit focus) puts them at the
 // top of the topmost z-band, which would bury OpenPen's own UI. Re-raise every
-// UI window above the overlays so hovering the toolbar, picker or settings hits
-// that window and stays interactive instead of drawing on the canvas behind it.
+// UI window above the overlays so hovering the toolbar or settings hits that
+// window and stays interactive instead of drawing on the canvas behind it.
 function raiseUiAboveOverlays (): void {
   if (settingsWin && !settingsWin.isDestroyed()) settingsWin.moveTop()
-  if (picker && !picker.isDestroyed() && picker.isVisible()) picker.moveTop()
   if (toolbar && !toolbar.isDestroyed()) toolbar.moveTop()
 }
 
@@ -205,8 +219,6 @@ function createToolbar (): void {
   toolbar.setIgnoreMouseEvents(true, { forward: true })
   load(toolbar, 'toolbar')
   toolbar.once('ready-to-show', () => toolbar?.show())
-  toolbar.on('move', hidePicker)
-  toolbar.on('blur', closePickerIfFocusLeft)
   toolbar.on('closed', () => app.quit())
 }
 
@@ -234,13 +246,11 @@ function fitToolbarHeight (height: unknown): void {
   toolbar.setResizable(true)
   toolbar.setBounds({ x: b.x, y: b.y, width: TOOLBAR_W, height: h })
   toolbar.setResizable(false)
-  hidePicker()
 }
 
 function toggleToolbar (): void {
   if (!toolbar || toolbar.isDestroyed()) return
   if (toolbar.isVisible()) {
-    hidePicker()
     toolbar.hide()
   } else {
     toolbar.showInactive()
@@ -254,28 +264,6 @@ function showToolbar (): void {
   if (!toolbar || toolbar.isDestroyed()) return
   if (!toolbar.isVisible()) toolbar.showInactive()
   toolbar.moveTop()
-}
-
-function createPicker (): void {
-  picker = new BrowserWindow({
-    width: PICKER_W,
-    height: PICKER_H,
-    frame: false,
-    transparent: true,
-    resizable: false,
-    movable: false,
-    skipTaskbar: true,
-    hasShadow: false,
-    show: false,
-    type: 'toolbar',
-    webPreferences: { preload: path.join(__dirname, 'preload.js') }
-  })
-  picker.setAlwaysOnTop(true, 'screen-saver', 2)
-  picker.setMenu(null)
-  // Popover behavior: close only when focus leaves both the picker and the
-  // toolbar, so clicking around the toolbar keeps it open.
-  picker.on('blur', closePickerIfFocusLeft)
-  load(picker, 'picker')
 }
 
 // A conventional framed dialog (unlike the frameless overlay windows): the OS
@@ -311,58 +299,10 @@ function openSettings (): void {
   settingsWin.setContentProtection(!IS_DEV && settings.protectUi)
   load(settingsWin, 'settings')
   settingsWin.once('ready-to-show', () => { settingsWin?.show(); settingsWin?.focus() })
-  settingsWin.on('closed', () => { settingsWin = null })
-}
-
-// Focus may still be mid-flight when 'blur' fires; check after it settles.
-function closePickerIfFocusLeft (): void {
-  if (!pickerShouldShow) return
-  setTimeout(() => {
-    const focused = BrowserWindow.getFocusedWindow()
-    if (focused !== picker && focused !== toolbar) hidePicker()
-  }, 10)
-}
-
-function hidePicker (): void {
-  if (!pickerShouldShow) return
-  pickerShouldShow = false
-  // Play the exit animation in the renderer; the window is actually hidden once
-  // it reports back via 'picker-hidden'. Show at full opacity — the panel itself
-  // fades via framer-motion, so no stepped main-process opacity ramp is needed.
-  send(picker, 'picker-visible', false)
-  send(toolbar, 'picker-open', false)
-}
-
-function togglePicker (): void {
-  if (!picker || picker.isDestroyed() || !toolbar || toolbar.isDestroyed()) return
-  if (pickerShouldShow) {
-    hidePicker()
-    return
-  }
-  const tb = toolbar.getBounds()
-  const wa = screen.getDisplayMatching(tb).workArea
-  // The toolbar window is much wider than the visible palette — the panel sits
-  // centred with a transparent click-through gutter on each side. Anchor the
-  // picker to the panel's real edges, not the window's, so it sits right beside
-  // the palette instead of a gutter-width away.
-  const panelLeft = tb.x + TOOLBAR_GUTTER_W
-  const panelRight = panelLeft + TOOLBAR_PANEL_W
-  let x = panelLeft - PICKER_W - 8
-  if (x < wa.x) x = panelRight + 8
-  const y = Math.max(wa.y, Math.min(tb.y, wa.y + wa.height - PICKER_H))
-  picker.setBounds({ x, y, width: PICKER_W, height: PICKER_H })
-  pickerShouldShow = true
-  // The window is shown empty/transparent (the panel isn't rendered until the
-  // renderer sees 'picker-visible'), so there's no opaque first frame to flash.
-  picker.showInactive()
-  // showInactive maps to SW_SHOWNA, which preserves z-order instead of raising
-  // the window. In draw mode the overlays were already moved to the top of the
-  // z-band, so without this the picker would appear *under* the drawing canvas
-  // and hovering it would draw through. Raise it above the overlays (and keep it
-  // there, like the toolbar) so it stays interactive while drawing.
-  picker.moveTop()
-  send(picker, 'picker-visible', true)
-  send(toolbar, 'picker-open', true)
+  settingsWin.on('closed', () => {
+    setHotkeyCapture(false)
+    settingsWin = null
+  })
 }
 
 function fitOverlays (): void {
@@ -531,7 +471,6 @@ async function hideUiForFreeze (): Promise<() => void> {
   const alreadyProtected = !IS_DEV && settings.protectUi
   if (!alreadyProtected) {
     toolbar?.setContentProtection(true)
-    picker?.setContentProtection(true)
     settingsWin?.setContentProtection(true)
     await new Promise(r => setTimeout(r, 50))
   }
@@ -546,8 +485,8 @@ function restoreOverlayInput (win: BrowserWindow | undefined): void {
   if (!state.mode) enterMouseMode()
 }
 
-// Captures the display under the cursor. OpenPen's own screenshot includes
-// the toolbar/picker so users can capture and share the UI while iterating.
+// Captures the display under the cursor. OpenPen's own screenshot includes the
+// toolbar so users can capture and share the UI while iterating.
 async function shoot (): Promise<void> {
   const d = displayAtCursor()
   const restoreProtection = settings.protectUi
@@ -555,7 +494,6 @@ async function shoot (): Promise<void> {
   try {
     if (restoreProtection) {
       toolbar?.setContentProtection(false)
-      picker?.setContentProtection(false)
     }
     await new Promise(r => setTimeout(r, 120)) // let UI cleanup and capture protection settle
     const img = await captureDisplay(d)
@@ -675,6 +613,8 @@ let manualUpdateCheck = false
 
 function buildSettingsState (): {
   protectUi: boolean
+  hotkeys: HotkeyMap
+  hotkeyError: string | null
   isDev: boolean
   version: string
   canUpdate: boolean
@@ -684,6 +624,8 @@ function buildSettingsState (): {
 } {
   return {
     protectUi: settings.protectUi,
+    hotkeys,
+    hotkeyError,
     isDev: IS_DEV,
     version: app.getVersion(),
     canUpdate: app.isPackaged,
@@ -697,9 +639,14 @@ function updateAvailable (): boolean {
   return updateStatus === 'downloading' || updateStatus === 'ready'
 }
 
+function broadcastHotkeys (): void {
+  if (toolbar && !toolbar.isDestroyed()) send(toolbar, 'hotkeys', hotkeys)
+}
+
 function broadcastSettingsState (): void {
   const state = buildSettingsState()
   if (settingsWin && !settingsWin.isDestroyed()) send(settingsWin, 'settings-state', state)
+  broadcastHotkeys()
   if (toolbar && !toolbar.isDestroyed()) {
     send(toolbar, 'update-badge', { available: updateAvailable() })
   }
@@ -770,12 +717,15 @@ function checkForUpdatesManually (): void {
 }
 
 function buildTrayMenu (): Menu {
+  const hk = hotkeys
+  const withAccel = (accel: string, item: Electron.MenuItemConstructorOptions): Electron.MenuItemConstructorOptions =>
+    isHotkeyBound(accel) ? { ...item, accelerator: accel } : item
   const template: Electron.MenuItemConstructorOptions[] = [
-    { label: 'Toggle drawing', accelerator: 'Ctrl+Shift+D', click: () => setDrawMode(!state.mode) },
-    { label: 'Clear screens', accelerator: 'Ctrl+Shift+C', click: () => runCmd('clear') },
-    { label: 'Hide/show ink', accelerator: 'Ctrl+Shift+H', click: () => setHidden(!state.hidden) },
-    { label: 'Show/hide toolbar', accelerator: 'Ctrl+Shift+T', click: toggleToolbar },
-    { label: 'Screenshot', accelerator: 'Ctrl+Shift+S', click: () => { void shoot() } },
+    withAccel(hk.toggleDraw, { label: 'Toggle drawing', click: () => setDrawMode(!state.mode) }),
+    withAccel(hk.clear, { label: 'Clear screens', click: () => runCmd('clear') }),
+    withAccel(hk.toggleHide, { label: 'Hide/show ink', click: () => setHidden(!state.hidden) }),
+    withAccel(hk.toggleToolbar, { label: 'Show/hide toolbar', click: toggleToolbar }),
+    withAccel(hk.screenshot, { label: 'Screenshot', click: () => { void shoot() } }),
     { type: 'separator' },
     {
       label: IS_DEV ? 'Hide toolbar from recordings (disabled in dev)' : 'Hide toolbar from recordings',
@@ -810,7 +760,11 @@ function buildTrayMenu (): Menu {
 
 function createTray (): void {
   tray = new Tray(makeTrayIcon())
-  tray.setToolTip('OpenPen: mouse mode (Ctrl+Shift+D)')
+  tray.setToolTip(
+    isHotkeyBound(hotkeys.toggleDraw)
+      ? `OpenPen: mouse mode (${hotkeys.toggleDraw})`
+      : 'OpenPen'
+  )
   tray.setContextMenu(buildTrayMenu())
   tray.on('click', showToolbar)
 }
@@ -818,33 +772,139 @@ function createTray (): void {
 // The tray's "Hide toolbar from recordings" checkbox mirrors settings.protectUi;
 // rebuild the menu so it stays in sync when changed from the settings window.
 function refreshTray (): void {
+  tray?.setToolTip(
+    isHotkeyBound(hotkeys.toggleDraw)
+      ? `OpenPen: mouse mode (${hotkeys.toggleDraw})`
+      : 'OpenPen'
+  )
   tray?.setContextMenu(buildTrayMenu())
 }
 
-// Global tool hotkeys — jump straight to a tool from any app (auto-enters draw
-// mode). This mirrors the accel numbers in src/tools.ts: main and the renderer
-// are compiled separately and can't share that module, so the tool names and
-// accelerator digits are the shared vocabulary across the process seam. Keep
-// this in step with the registry's `accel` values.
-const TOOL_SHORTCUTS: Record<string, string> = {
-  1: 'pen', 2: 'drag', 3: 'highlighter', 4: 'eraser',
-  5: 'text', 6: 'line', 7: 'arrow', 8: 'rect', 9: 'ellipse'
+type HotkeyHandler = { action: HotkeyAction; accel: string; fn: () => void }
+
+let registeredAccelerators: string[] = []
+let hotkeyCaptureActive = false
+
+function setHotkeyCapture (on: boolean): void {
+  if (hotkeyCaptureActive === on) return
+  hotkeyCaptureActive = on
+  if (on) {
+    unregisterConfigurableShortcuts()
+    globalShortcut.unregister('CommandOrControl+Z')
+    globalShortcut.unregister('CommandOrControl+Shift+Z')
+    globalShortcut.unregister('CommandOrControl+Y')
+    globalShortcut.unregister('Escape')
+  } else {
+    registerConfigurableShortcuts()
+    updateGlobalEditShortcuts()
+  }
 }
 
-function registerShortcuts (): void {
-  globalShortcut.register('Ctrl+Shift+D', () => setDrawMode(!state.mode))
-  globalShortcut.register('Ctrl+Shift+M', () => setDrawMode(false))
-  for (const [n, tool] of Object.entries(TOOL_SHORTCUTS)) {
-    globalShortcut.register(`Ctrl+Shift+${n}`, () => send(toolbar, 'pick-tool', tool))
+function hotkeyHandlers (map: HotkeyMap): HotkeyHandler[] {
+  const handlers: HotkeyHandler[] = [
+    { action: 'toggleDraw', accel: map.toggleDraw, fn: () => setDrawMode(!state.mode) },
+    { action: 'mouseMode', accel: map.mouseMode, fn: () => setDrawMode(false) },
+    { action: 'clear', accel: map.clear, fn: () => runCmd('clear') },
+    { action: 'undo', accel: map.undo, fn: () => runCmd('undo') },
+    { action: 'redo', accel: map.redo, fn: () => runCmd('redo') },
+    { action: 'screenshot', accel: map.screenshot, fn: () => { void shoot() } },
+    { action: 'whiteboard', accel: map.whiteboard, fn: () => toggleBg('white') },
+    { action: 'blackboard', accel: map.blackboard, fn: () => toggleBg('black') },
+    { action: 'toggleHide', accel: map.toggleHide, fn: () => setHidden(!state.hidden) },
+    { action: 'toggleToolbar', accel: map.toggleToolbar, fn: toggleToolbar }
+  ]
+  for (const action of HOTKEY_ACTIONS) {
+    if (!action.startsWith('tool:')) continue
+    const tool = action.slice(5)
+    handlers.push({
+      action,
+      accel: map[action],
+      fn: () => send(toolbar, 'pick-tool', tool)
+    })
   }
-  globalShortcut.register('Ctrl+Shift+C', () => runCmd('clear'))
-  globalShortcut.register('Ctrl+Shift+U', () => runCmd('undo'))
-  globalShortcut.register('Ctrl+Shift+Y', () => runCmd('redo'))
-  globalShortcut.register('Ctrl+Shift+S', () => { void shoot() })
-  globalShortcut.register('Ctrl+Shift+W', () => toggleBg('white'))
-  globalShortcut.register('Ctrl+Shift+B', () => toggleBg('black'))
-  globalShortcut.register('Ctrl+Shift+H', () => setHidden(!state.hidden))
-  globalShortcut.register('Ctrl+Shift+T', toggleToolbar)
+  return handlers.filter(h => isHotkeyBound(h.accel))
+}
+
+function unregisterConfigurableShortcuts (): void {
+  for (const accel of registeredAccelerators) globalShortcut.unregister(accel)
+  registeredAccelerators = []
+}
+
+function registerConfigurableShortcuts (): boolean {
+  unregisterConfigurableShortcuts()
+  const registered: string[] = []
+  for (const { accel, fn } of hotkeyHandlers(hotkeys)) {
+    if (!globalShortcut.register(accel, fn)) {
+      for (const a of registered) globalShortcut.unregister(a)
+      registeredAccelerators = []
+      return false
+    }
+    registered.push(accel)
+  }
+  registeredAccelerators = registered
+  return true
+}
+
+function applyHotkeys (): string | null {
+  const previous = { ...hotkeys }
+  if (registerConfigurableShortcuts()) {
+    hotkeyError = null
+    refreshTray()
+    return null
+  }
+  hotkeys = previous
+  if (!registerConfigurableShortcuts()) {
+    console.error('failed to restore hotkeys after registration error')
+  }
+  return 'That shortcut could not be registered. It may already be in use by another app.'
+}
+
+function setHotkey (action: HotkeyAction, accelerator: string, force = false): void {
+  if (accelerator === UNBOUND_HOTKEY) {
+    hotkeys = { ...hotkeys, [action]: UNBOUND_HOTKEY }
+    hotkeyError = null
+    applyHotkeys()
+    settings.hotkeys = hotkeys
+    saveSettings()
+    broadcastSettingsState()
+    return
+  }
+  if (!isValidAccelerator(accelerator)) {
+    hotkeyError = 'Use at least one modifier (Ctrl, Alt, or Shift) plus a key.'
+    broadcastSettingsState()
+    return
+  }
+  const conflict = findHotkeyConflict(hotkeys, action, accelerator)
+  if (conflict && !force) {
+    hotkeyError = 'That shortcut is already assigned to another action.'
+    broadcastSettingsState()
+    return
+  }
+  const next = conflict && force
+    ? { ...hotkeys, [conflict]: UNBOUND_HOTKEY, [action]: accelerator }
+    : { ...hotkeys, [action]: accelerator }
+  const prev = hotkeys
+  hotkeys = next
+  const err = applyHotkeys()
+  if (err) {
+    hotkeyError = err
+    hotkeys = prev
+    applyHotkeys()
+  } else {
+    hotkeyError = null
+    settings.hotkeys = hotkeys
+    saveSettings()
+  }
+  broadcastSettingsState()
+}
+
+function resetHotkeys (): void {
+  hotkeys = { ...DEFAULT_HOTKEYS }
+  settings.hotkeys = hotkeys
+  hotkeyError = null
+  applyHotkeys()
+  saveSettings()
+  broadcastSettingsState()
 }
 
 function wireIpc (): void {
@@ -870,13 +930,16 @@ function wireIpc (): void {
     send(toolbar, 'hidden', state.hidden)
     updateTooltipSide()
     pushHistory()
+    send(toolbar, 'hotkeys', hotkeys)
     send(toolbar, 'update-badge', { available: updateAvailable() })
   })
   ipcMain.on('tool-state', (_e, s: ToolState) => {
     state.toolState = s
     sendOverlays('tool-state', s)
-    send(picker, 'color', s.color)
   })
+  // Drawing on a canvas asks the toolbar to close any open menu (its own
+  // outside-press can't see clicks that land in another window).
+  ipcMain.on('draw-start', () => send(toolbar, 'close-menus'))
   ipcMain.on('set-mode', (_e, on: boolean) => setDrawMode(on))
   // Overlays are non-activating so drawing never steals focus, but the text
   // editor needs the keyboard: grant focus for the edit's duration only, then
@@ -910,14 +973,11 @@ function wireIpc (): void {
   ipcMain.on('adjust-size', (_e, d: number) => send(toolbar, 'adjust-size', d))
   ipcMain.on('set-bg', (_e, b: Bg) => toggleBg(b))
   ipcMain.on('screenshot', () => { void shoot() })
-  ipcMain.on('toggle-picker', togglePicker)
-  ipcMain.on('set-color', (_e, c: string) => send(toolbar, 'set-color', c))
   ipcMain.on('theme', (_e, t: string) => {
     resolvedTheme = t === 'dark' ? 'dark' : 'light'
     // Broadcast to every window at once so their theme crossfades start in sync
     // (the toolbar resolves the theme but applies it via this same message).
     send(toolbar, 'theme', t)
-    send(picker, 'theme', t)
     send(settingsWin, 'theme', t)
   })
   ipcMain.on('open-settings', openSettings)
@@ -936,19 +996,26 @@ function wireIpc (): void {
     refreshTray()
     broadcastSettingsState()
   })
-  ipcMain.on('picker-ready', () => {
-    if (state.toolState) send(picker, 'color', state.toolState.color)
+  ipcMain.on('set-hotkey', (_e, payload: unknown) => {
+    if (
+      typeof payload !== 'object' || payload === null ||
+      typeof (payload as { action?: unknown }).action !== 'string' ||
+      typeof (payload as { accelerator?: unknown }).accelerator !== 'string'
+    ) return
+    const { action, accelerator, force } = payload as {
+      action: string
+      accelerator: string
+      force?: boolean
+    }
+    if (!(HOTKEY_ACTIONS as string[]).includes(action)) return
+    setHotkey(action as HotkeyAction, accelerator, Boolean(force))
   })
-  // The renderer finished its exit animation; hide the window for real — unless
-  // a re-open flipped pickerShouldShow back on in the meantime.
-  ipcMain.on('picker-hidden', () => {
-    if (!pickerShouldShow && picker && !picker.isDestroyed()) picker.hide()
-  })
+  ipcMain.on('reset-hotkeys', resetHotkeys)
+  ipcMain.on('hotkey-capture', (_e, on: unknown) => setHotkeyCapture(Boolean(on)))
   ipcMain.on('toolbar-drag-start', (_e, p: unknown) => {
     if (!toolbar || toolbar.isDestroyed() || !isPoint(p)) return
     const b = toolbar.getBounds()
     toolbarDrag = { startX: p.x, startY: p.y, winX: b.x, winY: b.y }
-    hidePicker()
   })
   ipcMain.on('toolbar-drag-move', (_e, p: unknown) => {
     if (!toolbar || toolbar.isDestroyed() || !toolbarDrag || !isPoint(p)) return
@@ -995,10 +1062,9 @@ if (!app.requestSingleInstanceLock()) {
     loadSettings()
     createOverlays()
     createToolbar()
-    createPicker()
     applyUiCaptureProtection()
     createTray()
-    registerShortcuts()
+    registerConfigurableShortcuts()
     wireIpc()
     initAutoUpdate()
     screen.on('display-metrics-changed', () => { fitOverlays(); updateTooltipSide() })

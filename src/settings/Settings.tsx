@@ -1,12 +1,14 @@
-import React, { useEffect, useState } from 'react'
-import { Monitor, Moon, Palette, Info, Video, Sun, type LucideIcon } from 'lucide-react'
+import React, { useEffect, useRef, useState } from 'react'
+import { Monitor, Moon, Palette, Info, Video, Sun, Keyboard, RotateCcw, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { applyDarkClass } from '@/lib/theme'
 import { Button } from '@/components/ui/button'
 import type { SettingsState, ThemePref } from '@/ipc'
+import { DEFAULT_HOTKEYS, HOTKEY_GROUPS, allHotkeysAtDefault, findHotkeyConflict, hotkeyLabel, UNBOUND_HOTKEY, type HotkeyAction } from '@/hotkeys'
+import { HotkeyInput } from './HotkeyInput'
 import '@/styles/globals.css'
 
-type Section = 'appearance' | 'recording' | 'about'
+type Section = 'appearance' | 'hotkeys' | 'recording' | 'about'
 
 interface SavedState { theme?: ThemePref }
 
@@ -27,12 +29,15 @@ const THEMES: Array<{ value: ThemePref, label: string, Icon: LucideIcon }> = [
 
 const NAV: Array<{ value: Section, label: string, Icon: LucideIcon }> = [
   { value: 'appearance', label: 'Appearance', Icon: Palette },
+  { value: 'hotkeys', label: 'Hotkeys', Icon: Keyboard },
   { value: 'recording', label: 'Recording', Icon: Video },
   { value: 'about', label: 'About', Icon: Info }
 ]
 
 const EMPTY_STATE: SettingsState = {
   protectUi: false,
+  hotkeys: DEFAULT_HOTKEYS,
+  hotkeyError: null,
   isDev: false,
   version: '',
   canUpdate: false,
@@ -112,6 +117,14 @@ export default function Settings (): React.JSX.Element {
   const [section, setSection] = useState<Section>('appearance')
   const [theme, setThemeState] = useState<ThemePref>(() => loadSaved().theme ?? 'system')
   const [state, setState] = useState<SettingsState>(EMPTY_STATE)
+  const [recordingAction, setRecordingAction] = useState<HotkeyAction | null>(null)
+  const [pendingHotkey, setPendingHotkey] = useState<{
+    action: HotkeyAction
+    accelerator: string
+    conflict: HotkeyAction
+  } | null>(null)
+  const rowRefs = useRef<Map<HotkeyAction, HTMLDivElement>>(new Map())
+  const [confirmResetAll, setConfirmResetAll] = useState(false)
 
   useEffect(() => {
     applyDarkClass(resolveTheme(loadSaved().theme ?? 'system') === 'dark')
@@ -120,8 +133,20 @@ export default function Settings (): React.JSX.Element {
       window.openpen.on('settings-state', setState)
     ]
     window.openpen.send('settings-ready')
-    return () => offs.forEach(off => off())
+    return () => {
+      window.openpen.send('hotkey-capture', false)
+      offs.forEach(off => off())
+    }
   }, [])
+
+  useEffect(() => {
+    window.openpen.send('hotkey-capture', recordingAction !== null || pendingHotkey !== null)
+  }, [recordingAction, pendingHotkey])
+
+  useEffect(() => {
+    if (!pendingHotkey) return
+    rowRefs.current.get(pendingHotkey.action)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [pendingHotkey])
 
   const pickTheme = (t: ThemePref): void => {
     setThemeState(t)
@@ -129,8 +154,40 @@ export default function Settings (): React.JSX.Element {
   }
 
   const setProtectUi = (v: boolean): void => window.openpen.send('set-protect-ui', v)
+  const applyHotkey = (action: HotkeyAction, accelerator: string, force = false): void => {
+    setPendingHotkey(null)
+    window.openpen.send('set-hotkey', { action, accelerator, force })
+    setRecordingAction(null)
+  }
+  const trySetHotkey = (action: HotkeyAction, accelerator: string): void => {
+    const conflict = findHotkeyConflict(state.hotkeys, action, accelerator)
+    if (conflict) {
+      setPendingHotkey({ action, accelerator, conflict })
+      return
+    }
+    applyHotkey(action, accelerator)
+  }
+  const cancelHotkeyEdit = (): void => {
+    setPendingHotkey(null)
+    setRecordingAction(null)
+  }
+  const unbindHotkey = (action: HotkeyAction): void => {
+    setPendingHotkey(null)
+    applyHotkey(action, UNBOUND_HOTKEY)
+  }
+  const resetHotkeys = (): void => {
+    setRecordingAction(null)
+    setPendingHotkey(null)
+    window.openpen.send('reset-hotkeys')
+  }
+  const resetOneHotkey = (action: HotkeyAction): void => {
+    const defaultAccel = DEFAULT_HOTKEYS[action]
+    const conflict = findHotkeyConflict(state.hotkeys, action, defaultAccel)
+    applyHotkey(action, defaultAccel, Boolean(conflict))
+  }
   const statusMessage = updateMessage(state)
   const checking = state.updateStatus === 'checking' || state.updateStatus === 'downloading'
+  const allHotkeysDefault = allHotkeysAtDefault(state.hotkeys)
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
@@ -182,6 +239,128 @@ export default function Settings (): React.JSX.Element {
                   ))}
                 </div>
               </Row>
+            </div>
+          </section>
+        )}
+
+        {section === 'hotkeys' && (
+          <section>
+            <h2 className="text-base font-semibold">Hotkeys</h2>
+            <div className="mt-1 space-y-1.5 text-xs leading-relaxed text-muted-foreground">
+              <p>Global shortcuts work from any app.</p>
+              <p>Click a shortcut to change it, then hold Ctrl, Shift, or Alt plus a key.</p>
+              <p>Backspace or Delete unbinds a shortcut.</p>
+              <p>Esc cancels.</p>
+            </div>
+            {state.hotkeyError && (
+              <p className="mt-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                {state.hotkeyError}
+              </p>
+            )}
+            <div className="mt-4 space-y-6">
+              {HOTKEY_GROUPS.map(group => (
+                <div key={group.label}>
+                  <h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                    {group.label}
+                  </h3>
+                  <div className="mt-2 divide-y">
+                    {group.actions.map(({ id, label }) => (
+                      <div
+                        key={id}
+                        ref={el => {
+                          if (el) rowRefs.current.set(id, el)
+                          else rowRefs.current.delete(id)
+                        }}
+                        className="flex items-start justify-between gap-4 py-2.5"
+                      >
+                        <div className="min-w-0 pt-1.5 text-sm text-foreground">{label}</div>
+                        <div className="flex shrink-0 flex-col items-end gap-2">
+                          <div className="flex items-center gap-1.5">
+                            <HotkeyInput
+                              value={
+                                pendingHotkey?.action === id
+                                  ? pendingHotkey.accelerator
+                                  : state.hotkeys[id]
+                              }
+                              defaultValue={DEFAULT_HOTKEYS[id]}
+                              recording={recordingAction === id && pendingHotkey?.action !== id}
+                              onStart={() => { setPendingHotkey(null); setRecordingAction(id) }}
+                              onCancel={cancelHotkeyEdit}
+                              onChange={accel => trySetHotkey(id, accel)}
+                              onUnbind={() => unbindHotkey(id)}
+                            />
+                            <button
+                              type="button"
+                              title="Reset to default"
+                              aria-label={`Reset ${label} to default`}
+                              disabled={state.hotkeys[id] === DEFAULT_HOTKEYS[id]}
+                              onClick={() => resetOneHotkey(id)}
+                              className={cn(
+                                'inline-flex size-8 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors outline-none',
+                                'hover:bg-accent/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring',
+                                'disabled:pointer-events-none disabled:opacity-40'
+                              )}
+                            >
+                              <RotateCcw className="size-3.5" />
+                            </button>
+                          </div>
+                          {pendingHotkey?.action === id && (
+                            <div className="max-w-[16rem] rounded-md border border-border bg-muted/40 px-2.5 py-2 text-xs">
+                              <p className="text-muted-foreground">
+                                Used by{' '}
+                                <span className="font-medium text-foreground">
+                                  {hotkeyLabel(pendingHotkey.conflict)}
+                                </span>
+                                . Assigning here unbinds it.
+                              </p>
+                              <div className="mt-2 flex gap-1.5">
+                                <Button
+                                  size="xs"
+                                  onClick={() => applyHotkey(pendingHotkey.action, pendingHotkey.accelerator, true)}
+                                >
+                                  Assign anyway
+                                </Button>
+                                <Button
+                                  size="xs"
+                                  variant="outline"
+                                  onClick={() => setPendingHotkey(null)}
+                                >
+                                  Try again
+                                </Button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-6 border-t pt-4">
+              {confirmResetAll ? (
+                <div className="max-w-md rounded-md border border-border bg-muted/40 px-3 py-3">
+                  <p className="text-sm text-foreground">
+                    Reset all hotkeys to their defaults?
+                  </p>
+                  <div className="mt-3 flex gap-2">
+                    <Button size="sm" onClick={() => { resetHotkeys(); setConfirmResetAll(false) }}>
+                      Yes
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setConfirmResetAll(false)}>
+                      No
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <Button
+                  variant="outline"
+                  disabled={allHotkeysDefault}
+                  onClick={() => setConfirmResetAll(true)}
+                >
+                  Reset all to defaults
+                </Button>
+              )}
             </div>
           </section>
         )}
