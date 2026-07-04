@@ -9,6 +9,7 @@ const SEND = new Set([
   'overlay-cursor-ready', 'text-editing',
   'open-settings', 'settings-ready', 'set-theme', 'set-protect-ui',
   'set-hotkey', 'reset-hotkeys', 'hotkey-capture',
+  'pick-screenshot-dir', 'reset-screenshot-dir',
   'check-for-updates', 'install-update',
   'eyedrop-start', 'eyedrop-pick', 'eyedrop-cancel'
 ])

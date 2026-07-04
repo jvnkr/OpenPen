@@ -19,6 +19,8 @@ export interface SettingsState {
   protectUi: boolean
   hotkeys: HotkeyMap
   hotkeyError: string | null
+  screenshotDir: string
+  screenshotDirDefault: string
   isDev: boolean
   version: string
   canUpdate: boolean
@@ -47,6 +49,8 @@ export interface SendMap {
   'set-hotkey': { action: HotkeyAction; accelerator: string; force?: boolean }
   'reset-hotkeys': void
   'hotkey-capture': boolean
+  'pick-screenshot-dir': void
+  'reset-screenshot-dir': void
   'text-editing': boolean
   'draw-start': void
   'toolbar-drag-start': Point2

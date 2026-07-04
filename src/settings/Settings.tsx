@@ -38,6 +38,8 @@ const EMPTY_STATE: SettingsState = {
   protectUi: false,
   hotkeys: DEFAULT_HOTKEYS,
   hotkeyError: null,
+  screenshotDir: '',
+  screenshotDirDefault: '',
   isDev: false,
   version: '',
   canUpdate: false,
@@ -369,7 +371,7 @@ export default function Settings (): React.JSX.Element {
           <section>
             <h2 className="text-base font-semibold">Recording</h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              Control what screen recorders and screenshots capture.
+              Control what screen recorders capture and where screenshots are saved.
             </p>
             <div className="mt-4 divide-y">
               <Row
@@ -386,6 +388,37 @@ export default function Settings (): React.JSX.Element {
                   onChange={setProtectUi}
                 />
               </Row>
+              <div className="py-3">
+                <div className="text-sm font-medium text-foreground">Screenshot save folder</div>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  Annotated screenshots are saved here.
+                </p>
+                {state.screenshotDir && (
+                  <p className="mt-2 break-all font-mono text-xs text-foreground">
+                    {state.screenshotDir}
+                  </p>
+                )}
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => window.openpen.send('pick-screenshot-dir')}
+                  >
+                    Change…
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={
+                      !state.screenshotDirDefault ||
+                      state.screenshotDir === state.screenshotDirDefault
+                    }
+                    onClick={() => window.openpen.send('reset-screenshot-dir')}
+                  >
+                    Use default
+                  </Button>
+                </div>
+              </div>
             </div>
           </section>
         )}

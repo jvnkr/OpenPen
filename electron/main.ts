@@ -20,7 +20,7 @@ type Bg = 'none' | 'white' | 'black'
 interface ToolState { tool: string; color: string; size: number }
 interface AppState { mode: boolean; bg: Bg; hidden: boolean; toolState: ToolState | null }
 interface HistoryState { canUndo: boolean; canRedo: boolean }
-interface Settings { protectUi: boolean; hotkeys?: Partial<HotkeyMap> }
+interface Settings { protectUi: boolean; hotkeys?: Partial<HotkeyMap>; screenshotDir?: string }
 
 // One overlay per display, keyed by display id.
 const overlays = new Map<number, BrowserWindow>()
@@ -62,6 +62,15 @@ let hotkeys: HotkeyMap = { ...DEFAULT_HOTKEYS }
 let hotkeyError: string | null = null
 const settingsFile = (): string => path.join(app.getPath('userData'), 'settings.json')
 
+function defaultScreenshotDir (): string {
+  return path.join(app.getPath('pictures'), 'OpenPen')
+}
+
+function getScreenshotDir (): string {
+  const dir = settings.screenshotDir?.trim()
+  return dir || defaultScreenshotDir()
+}
+
 function sanitizeHotkeys (partial?: Partial<HotkeyMap>): Partial<HotkeyMap> {
   if (!partial) return {}
   const out: Partial<HotkeyMap> = {}
@@ -76,7 +85,10 @@ function sanitizeHotkeys (partial?: Partial<HotkeyMap>): Partial<HotkeyMap> {
 function loadSettings (): void {
   try {
     const raw = JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) as Partial<Settings>
-    Object.assign(settings, { protectUi: raw.protectUi })
+    Object.assign(settings, {
+      protectUi: raw.protectUi,
+      screenshotDir: typeof raw.screenshotDir === 'string' ? raw.screenshotDir.trim() : undefined
+    })
     hotkeys = mergeHotkeys(sanitizeHotkeys(raw.hotkeys))
   } catch { /* first run */ }
   if (IS_DEV) settings.protectUi = false
@@ -86,7 +98,8 @@ function saveSettings (): void {
   try {
     fs.writeFileSync(settingsFile(), JSON.stringify({
       protectUi: settings.protectUi,
-      hotkeys: hotkeys
+      hotkeys: hotkeys,
+      screenshotDir: settings.screenshotDir
     }))
   } catch (err) {
     console.error('failed to save settings', err)
@@ -498,7 +511,7 @@ async function shoot (): Promise<void> {
     await new Promise(r => setTimeout(r, 120)) // let UI cleanup and capture protection settle
     const img = await captureDisplay(d)
     if (!img) return
-    const dir = path.join(app.getPath('pictures'), 'OpenPen')
+    const dir = getScreenshotDir()
     fs.mkdirSync(dir, { recursive: true })
     const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
     const file = path.join(dir, `openpen-${stamp}.png`)
@@ -615,6 +628,8 @@ function buildSettingsState (): {
   protectUi: boolean
   hotkeys: HotkeyMap
   hotkeyError: string | null
+  screenshotDir: string
+  screenshotDirDefault: string
   isDev: boolean
   version: string
   canUpdate: boolean
@@ -626,6 +641,8 @@ function buildSettingsState (): {
     protectUi: settings.protectUi,
     hotkeys,
     hotkeyError,
+    screenshotDir: getScreenshotDir(),
+    screenshotDirDefault: defaultScreenshotDir(),
     isDev: IS_DEV,
     version: app.getVersion(),
     canUpdate: app.isPackaged,
@@ -637,6 +654,32 @@ function buildSettingsState (): {
 
 function updateAvailable (): boolean {
   return updateStatus === 'downloading' || updateStatus === 'ready'
+}
+
+function resetScreenshotDir (): void {
+  settings.screenshotDir = undefined
+  saveSettings()
+  broadcastSettingsState()
+}
+
+async function pickScreenshotDir (): Promise<void> {
+  const parent = settingsWin && !settingsWin.isDestroyed()
+    ? settingsWin
+    : toolbar && !toolbar.isDestroyed()
+      ? toolbar
+      : undefined
+  const opts: Electron.OpenDialogOptions = {
+    properties: ['openDirectory', 'createDirectory'],
+    defaultPath: getScreenshotDir(),
+    title: 'Choose screenshot save folder'
+  }
+  const result = parent
+    ? await dialog.showOpenDialog(parent, opts)
+    : await dialog.showOpenDialog(opts)
+  if (result.canceled || result.filePaths.length === 0) return
+  settings.screenshotDir = result.filePaths[0]
+  saveSettings()
+  broadcastSettingsState()
 }
 
 function broadcastHotkeys (): void {
@@ -1011,6 +1054,8 @@ function wireIpc (): void {
     setHotkey(action as HotkeyAction, accelerator, Boolean(force))
   })
   ipcMain.on('reset-hotkeys', resetHotkeys)
+  ipcMain.on('pick-screenshot-dir', () => { void pickScreenshotDir() })
+  ipcMain.on('reset-screenshot-dir', resetScreenshotDir)
   ipcMain.on('hotkey-capture', (_e, on: unknown) => setHotkeyCapture(Boolean(on)))
   ipcMain.on('toolbar-drag-start', (_e, p: unknown) => {
     if (!toolbar || toolbar.isDestroyed() || !isPoint(p)) return
