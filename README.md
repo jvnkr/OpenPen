@@ -18,7 +18,7 @@ Get the latest Windows installer from [Releases](https://github.com/jvnkr/OpenPe
 - Switch between draw mode and mouse mode with one hotkey. Your ink stays visible either way
 - Pen, highlighter, eraser, line, arrow, rectangle, ellipse, text, and drag to move objects
 - Fading ink for temporary annotations. Strokes fade out on their own, with an adjustable duration
-- 8 preset colors plus a custom color picker. Save your own swatches, pick a color from the screen, and adjust brush size with a slider, `[` `]`, or the mouse wheel
+- Custom color picker with a palette you build yourself. Add swatches, pick a color from the screen, and adjust brush size with a slider, `[` `]`, or the mouse wheel
 - Unlimited undo and redo, plus clear screen
 - Whiteboard and blackboard modes
 - Hide or show ink without clearing it
