@@ -23,7 +23,7 @@ Get the latest Windows installer from [Releases](https://github.com/jvnkr/OpenPe
 - Whiteboard and blackboard modes
 - Hide or show ink without clearing it
 - Save a screenshot with your annotations to `Pictures\OpenPen\`
-- System tray with quick actions. Draggable toolbar that collapses to a mini pill
+- System tray with quick actions. Draggable toolbar
 - Auto-updates from GitHub Releases, with update status in Settings
 - Light and dark themes
 - Customize global hotkeys in Settings. Reset per action or all at once, unbind shortcuts you do not need
