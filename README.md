@@ -14,7 +14,7 @@ Get the latest Windows installer from [Releases](https://github.com/jvnkr/OpenPe
 
 - Draw over any app with a transparent overlay that stays on top
 - Works on every monitor. Undo and redo apply to the screen under your cursor
-- Recording friendly. Ink shows up in OBS and Zoom. The toolbar can stay hidden from recordings
+- Capture friendly. Ink shows up in OBS, Zoom, and screenshots. The toolbar can stay hidden from screen capture
 - Switch between draw mode and mouse mode with one hotkey. Your ink stays visible either way
 - Pen, highlighter, eraser, line, arrow, rectangle, ellipse, text, and drag to move objects
 - Fading ink for temporary annotations. Strokes fade out on their own, with an adjustable duration
@@ -53,9 +53,9 @@ Text tool: click to place, type, `Enter` to commit, `Shift+Enter` for a new line
 
 Fading ink: open the timer button in the toolbar to turn it on and set how long strokes stay visible.
 
-## Recording with OBS
+## Screen capture with OBS
 
-**Display Capture (recommended):** ink is drawn on screen, so a Display Capture source records it with no extra setup. Turn on "Hide UI from recordings" in Settings or the tray menu to keep the toolbar out of your recording.
+**Display Capture (recommended):** ink is drawn on screen, so a Display Capture source records it with no extra setup. Turn on "Hide UI from capture" in Settings (Capture section) or the tray menu to keep the toolbar out of recordings and screenshots.
 
 **Window / Game Capture:** add a Window Capture source for the window named `OpenPen Overlay` (one per display), layer it above your game, and set the capture method to "Windows 10 (1903 and up)".
 

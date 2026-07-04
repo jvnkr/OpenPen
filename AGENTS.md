@@ -12,7 +12,7 @@ floating toolbar.
 
 - `src/overlay/` – canvas ink engine and overlay window
 - `src/toolbar/` – tool palette, color picker, and theme controls
-- `src/settings/` – settings window (appearance, hotkeys, recording, updates, about)
+- `src/settings/` – settings window (appearance, hotkeys, capture, updates, about)
 - `src/hotkeys.ts` – hotkey definitions (mirrored in `electron/hotkeys.ts`)
 - `src/tools.ts` – tool definitions (single source of truth)
 - `src/ipc.ts` – typed renderer ↔ main IPC contract

@@ -15,6 +15,7 @@ import {
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL
 const IS_DEV = Boolean(DEV_URL)
+const APP_ID = app.isPackaged ? 'dev.openpen.app' : 'dev.openpen.app.dev'
 
 type Bg = 'none' | 'white' | 'black'
 interface ToolState { tool: string; color: string; size: number }
@@ -580,17 +581,17 @@ function endEyedrop (): void {
   restoreOverlayInput(win)
 }
 
-function showRecordingHelp (): void {
+function showCaptureHelp (): void {
   void dialog.showMessageBox({
     type: 'info',
-    title: 'OpenPen: recording and OBS setup',
-    message: 'Recording your annotations (OBS, Zoom, clips)',
+    title: 'OpenPen: screen capture and OBS setup',
+    message: 'Capturing your annotations (OBS, Zoom, screenshots, clips)',
     detail: [
       'OpenPen ink is drawn in a normal on-screen window, so any "Display Capture" source records it automatically. This is the recommended OBS setup.',
       '',
       'If you use Window Capture or Game Capture only, add one extra Window Capture source for the window named "OpenPen Overlay" (one per display), place it above your game source, and set its capture method to "Windows 10 (1903 and up)".',
       '',
-      '"Hide toolbar from recordings" (in the tray menu, on by default) keeps the toolbar and color picker visible to you but excluded from recordings and OpenPen screenshots.'
+      '"Hide toolbar from capture" (in the tray menu, on by default) keeps the toolbar and color picker visible to you but excluded from recordings, screenshots, and other screen capture.'
     ].join('\n')
   })
 }
@@ -771,7 +772,7 @@ function buildTrayMenu (): Menu {
     withAccel(hk.screenshot, { label: 'Screenshot', click: () => { void shoot() } }),
     { type: 'separator' },
     {
-      label: IS_DEV ? 'Hide toolbar from recordings (disabled in dev)' : 'Hide toolbar from recordings',
+      label: IS_DEV ? 'Hide toolbar from capture (disabled in dev)' : 'Hide toolbar from capture',
       type: 'checkbox',
       checked: !IS_DEV && settings.protectUi,
       enabled: !IS_DEV,
@@ -781,7 +782,7 @@ function buildTrayMenu (): Menu {
         saveSettings()
       }
     },
-    { label: 'Recording / OBS setup…', click: showRecordingHelp }
+    { label: 'Capture / OBS setup…', click: showCaptureHelp }
   ]
   // Update actions only make sense in an installed build.
   if (app.isPackaged) {
@@ -812,7 +813,7 @@ function createTray (): void {
   tray.on('click', showToolbar)
 }
 
-// The tray's "Hide toolbar from recordings" checkbox mirrors settings.protectUi;
+// The tray's "Hide toolbar from capture" checkbox mirrors settings.protectUi;
 // rebuild the menu so it stays in sync when changed from the settings window.
 function refreshTray (): void {
   tray?.setToolTip(
@@ -1103,7 +1104,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', () => { toolbar?.show(); toolbar?.focus() })
 
   void app.whenReady().then(() => {
-    app.setAppUserModelId('dev.openpen.app')
+    app.setAppUserModelId(APP_ID)
     loadSettings()
     createOverlays()
     createToolbar()

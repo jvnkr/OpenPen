@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <!-- OpenPen app mark: "OP" wordmark on the brand red (the default pen colour). -->
-  <rect width="256" height="256" rx="56" fill="#15161a"/>
+  <!-- OpenPen app mark: "OP" wordmark on a light blue background. -->
+  <rect width="256" height="256" rx="56" fill="#dbeafe"/>
   <text x="128" y="128" text-anchor="middle" dominant-baseline="central"
         font-family="'Segoe UI', system-ui, -apple-system, sans-serif"
-        font-weight="700" font-size="118" letter-spacing="-6" fill="#ffffff">OP</text>
+        font-weight="700" font-size="118" letter-spacing="-6" fill="#1e3a5f">OP</text>
 </svg>

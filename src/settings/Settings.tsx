@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Monitor, Moon, Palette, Info, Video, Sun, Keyboard, RotateCcw, type LucideIcon } from 'lucide-react'
+import { Monitor, Moon, Palette, Info, Camera, Sun, Keyboard, RotateCcw, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { applyDarkClass } from '@/lib/theme'
 import { Button } from '@/components/ui/button'
@@ -8,7 +8,7 @@ import { DEFAULT_HOTKEYS, HOTKEY_GROUPS, allHotkeysAtDefault, findHotkeyConflict
 import { HotkeyInput } from './HotkeyInput'
 import '@/styles/globals.css'
 
-type Section = 'appearance' | 'hotkeys' | 'recording' | 'about'
+type Section = 'appearance' | 'hotkeys' | 'capture' | 'about'
 
 interface SavedState { theme?: ThemePref }
 
@@ -30,7 +30,7 @@ const THEMES: Array<{ value: ThemePref, label: string, Icon: LucideIcon }> = [
 const NAV: Array<{ value: Section, label: string, Icon: LucideIcon }> = [
   { value: 'appearance', label: 'Appearance', Icon: Palette },
   { value: 'hotkeys', label: 'Hotkeys', Icon: Keyboard },
-  { value: 'recording', label: 'Recording', Icon: Video },
+  { value: 'capture', label: 'Capture', Icon: Camera },
   { value: 'about', label: 'About', Icon: Info }
 ]
 
@@ -367,19 +367,19 @@ export default function Settings (): React.JSX.Element {
           </section>
         )}
 
-        {section === 'recording' && (
+        {section === 'capture' && (
           <section>
-            <h2 className="text-base font-semibold">Recording</h2>
+            <h2 className="text-base font-semibold">Capture</h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              Control what screen recorders capture and where screenshots are saved.
+              Control what screen capture includes and where screenshots are saved.
             </p>
             <div className="mt-4 divide-y">
               <Row
-                title="Hide UI from recordings"
+                title="Hide UI from capture"
                 description={
                   state.isDev
                     ? 'Disabled in development mode.'
-                    : 'Exclude the toolbar and panels from screen capture, so recordings show your ink but not the UI.'
+                    : 'Exclude the toolbar and panels from screen capture, so recordings and screenshots show your ink but not the UI.'
                 }
               >
                 <Switch
