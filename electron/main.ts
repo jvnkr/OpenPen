@@ -167,6 +167,12 @@ function raiseOverlayTopmost (win: BrowserWindow): void {
 const liveGestures = new Set<string>()
 let raiseTimers: NodeJS.Timeout[] = []
 let raiseSuppressed = false
+// True while the pending raise batch follows a click on the taskbar itself —
+// the one trigger that reliably promotes the tray, and the case where a bare
+// moveTop can lose for good if a window's real WS_EX_TOPMOST bit was stripped
+// (Electron's cache still says it's set, so a plain setAlwaysOnTop no-ops).
+// Those batches use the full off→on topmost toggle instead.
+let raiseStrong = false
 // Slow fallback watchdog, used only when the native hook can't load (e.g. no
 // prebuild for this CPU). Degraded platforms keep taskbar recovery, with the
 // old interval behaviour.
@@ -177,11 +183,12 @@ let raiseFallback: NodeJS.Timeout | null = null
 // the UI), then OpenPen's UI back on top. Paused during an eyedrop, which
 // deliberately raises a frozen overlay above the UI windows so the whole screen
 // stays sample-able.
-function raiseStack (): void {
+function raiseStack (strong = false): void {
   if (eyedropDisplayId !== null || eyedropCapturing || state.hidden) return
   for (const [id, win] of overlays) {
     if (win.isDestroyed()) continue
-    win.moveTop()
+    if (strong) raiseOverlayTopmost(win)
+    else win.moveTop()
     const input = inputs.get(id)
     if (state.mode && input && !input.isDestroyed() && input.isVisible()) {
       try {
@@ -196,16 +203,18 @@ function raiseStack (): void {
 
 // The taskbar promotion lands shortly AFTER the input event that caused it, so
 // raise on a short delay, and once more in case the shell was slow. New
-// triggers reset the pending batch.
-function scheduleRaise (): void {
+// triggers reset the pending batch (a strong trigger keeps the batch strong).
+function scheduleRaise (strong = false): void {
   if (state.hidden) return
+  raiseStrong = raiseStrong || strong
   for (const t of raiseTimers) clearTimeout(t)
-  raiseTimers = [60, 250].map(delay => setTimeout(() => {
+  raiseTimers = [60, 250].map((delay, i) => setTimeout(() => {
     if (liveGestures.size > 0) {
       raiseSuppressed = true
       return
     }
-    raiseStack()
+    raiseStack(raiseStrong)
+    if (i === 1) raiseStrong = false // batch finished
   }, delay))
 }
 
@@ -218,8 +227,22 @@ function gestureEnded (key: string): void {
   }
 }
 
-function onReflexMouseDown (): void {
-  scheduleRaise()
+// A point inside a display's bounds but outside its work area sits on the
+// shell's reserved strip — the taskbar. uiohook reports physical pixels;
+// Electron's screen geometry is in DIPs, so convert first (mixed-DPI safe).
+function isTaskbarPoint (px: number, py: number): boolean {
+  const p = screen.screenToDipPoint({ x: px, y: py })
+  for (const d of screen.getAllDisplays()) {
+    const b = d.bounds
+    if (p.x < b.x || p.x >= b.x + b.width || p.y < b.y || p.y >= b.y + b.height) continue
+    const wa = d.workArea
+    return p.x < wa.x || p.x >= wa.x + wa.width || p.y < wa.y || p.y >= wa.y + wa.height
+  }
+  return false
+}
+
+function onReflexMouse (e: HookMouseEvent): void {
+  scheduleRaise(isTaskbarPoint(Number(e.x), Number(e.y)))
 }
 
 // Alt/Win releases are the moment Alt-Tab and Win+N switches actually land.
@@ -679,7 +702,7 @@ function updateGlobalEditShortcuts (): void {
 // forwarded to the overlay under the cursor; the button/wheel input is read from a
 // lazily-loaded global hook (uiohook-napi) so it registers while the overlay
 // ignores mouse events.
-interface HookMouseEvent { button: number }
+interface HookMouseEvent { button: number; x: number; y: number }
 interface HookWheelEvent { rotation: number; ctrlKey: boolean; shiftKey: boolean }
 interface HookKeyEvent { keycode: number }
 interface Uiohook {
@@ -734,8 +757,10 @@ async function startMouseHook (): Promise<void> {
       uiohook.on('mouseup', onGlobalMouseUp)
       uiohook.on('wheel', onGlobalWheel)
       // The topmost reflex shares the hook: any click or Alt/Win release may be
-      // the activation change that promotes the taskbar over the ink.
-      uiohook.on('mousedown', onReflexMouseDown)
+      // the activation change that promotes the taskbar over the ink. Mouse-ups
+      // count too — taskbar flyouts open on release.
+      uiohook.on('mousedown', onReflexMouse)
+      uiohook.on('mouseup', onReflexMouse)
       uiohook.on('keyup', onReflexKeyUp)
       hookListenerAttached = true
     }
@@ -882,8 +907,9 @@ function setHidden (hidden: boolean): void {
   updateGlobalEditShortcuts()
   updateRaiseReflex()
   // Freshly re-shown windows land wherever the shell left them; the reflex only
-  // fires on input, so restack once now.
-  if (!state.hidden) raiseStack()
+  // fires on input, so restack once now — strongly, since anything may have
+  // happened to the topmost bits while the windows sat hidden.
+  if (!state.hidden) raiseStack(true)
 }
 
 function toggleBg (c: Bg): void {
@@ -1026,8 +1052,9 @@ function endEyedrop (): void {
   escShortcutOn = false
   updateGlobalEditShortcuts()
   // Restore the whole stack: catchers back above the (now live) overlays, the
-  // toolbar/picker back on top. The reflex only fires on input, so do it here.
-  raiseStack()
+  // toolbar/picker back on top. The reflex only fires on input, so do it here —
+  // strongly: the click-through flips around an eyedrop can strip topmost bits.
+  raiseStack(true)
   restoreOverlayInput(win)
 }
 
