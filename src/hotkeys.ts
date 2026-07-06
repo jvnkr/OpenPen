@@ -6,6 +6,7 @@ import { TOOLS, type Tool } from './tools'
 export type HotkeyAction =
   | 'toggleDraw'
   | 'mouseMode'
+  | 'highlightCursor'
   | 'clear'
   | 'undo'
   | 'redo'
@@ -40,6 +41,7 @@ const toolAction = (tool: Tool): HotkeyAction => `tool:${tool}`
 export const DEFAULT_HOTKEYS: HotkeyMap = {
   toggleDraw: 'Ctrl+Shift+D',
   mouseMode: 'Ctrl+Shift+0',
+  highlightCursor: 'Ctrl+Shift+L',
   clear: 'Ctrl+Shift+C',
   undo: 'Ctrl+Shift+U',
   redo: 'Ctrl+Shift+Y',
@@ -59,6 +61,7 @@ export const HOTKEY_GROUPS: HotkeyGroup[] = [
     actions: [
       { id: 'toggleDraw', label: 'Toggle draw / mouse mode' },
       { id: 'mouseMode', label: 'Mouse mode' },
+      { id: 'highlightCursor', label: 'Highlight cursor' },
       { id: 'clear', label: 'Clear screen' },
       { id: 'undo', label: 'Undo' },
       { id: 'redo', label: 'Redo' },

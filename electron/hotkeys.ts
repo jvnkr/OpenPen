@@ -3,6 +3,7 @@
 export type HotkeyAction =
   | 'toggleDraw'
   | 'mouseMode'
+  | 'highlightCursor'
   | 'clear'
   | 'undo'
   | 'redo'
@@ -32,6 +33,7 @@ export function isHotkeyBound (accel: string): boolean {
 export const DEFAULT_HOTKEYS: HotkeyMap = {
   toggleDraw: 'Ctrl+Shift+D',
   mouseMode: 'Ctrl+Shift+0',
+  highlightCursor: 'Ctrl+Shift+L',
   clear: 'Ctrl+Shift+C',
   undo: 'Ctrl+Shift+U',
   redo: 'Ctrl+Shift+Y',

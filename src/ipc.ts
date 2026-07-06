@@ -15,6 +15,19 @@ import type { EyeDropData } from './overlay/EyeDropper'
 export type ThemePref = 'system' | 'light' | 'dark'
 export type UpdateStatus = 'idle' | 'checking' | 'downloading' | 'ready' | 'uptodate' | 'error'
 export interface Point2 { x: number; y: number }
+
+// Pointer traffic from an input-catcher window to its display's ink overlay.
+// Drawing input is captured by a separate nearly-invisible window (so the ink
+// window can stay permanently click-through and never pauses the apps behind
+// it) and replayed into the overlay's engine via this message.
+export interface DrawPoint { x: number; y: number; pressure: number }
+export type DrawInput =
+  | { t: 'down'; id: number; x: number; y: number; pressure: number; pen: boolean; shift: boolean }
+  | { t: 'move'; id: number; pts: DrawPoint[]; shift: boolean }
+  | { t: 'up'; id: number }
+  | { t: 'enter'; x: number; y: number }
+  | { t: 'leave' }
+  | { t: 'wheel'; x: number; y: number; dy: number }
 export interface SettingsState {
   protectUi: boolean
   hotkeys: HotkeyMap
@@ -35,9 +48,14 @@ export interface SendMap {
   'overlay-ready': void
   'toolbar-ready': void
   'settings-ready': void
+  'input-ready': void
   'overlay-cursor-ready': void
+  'draw-input': DrawInput
   'tool-state': ToolState
   'set-mode': boolean
+  // Toggle the click-through cursor highlighter (a mouse-mode variant): a halo
+  // that follows the pointer and pulses on each click.
+  'set-highlight': boolean
   'cmd': string
   'history': HistoryState
   'pick-tool': Tool | 'mouse'
@@ -75,6 +93,17 @@ export interface RecvMap {
   'tool-state': ToolState
   'mode': boolean
   'bg': Bg
+  // Cursor-highlighter state and the main-process feed that drives it. `highlight`
+  // is the on/off toggle; `highlight-pointer` streams the real cursor position in
+  // the receiving overlay's local coords (null when the pointer left this
+  // display); `highlight-press` is the primary button going down (true) / up
+  // (false), which pulses the halo.
+  'highlight': boolean
+  'highlight-pointer': Point2 | null
+  'highlight-press': boolean
+  // Forwarded pointer traffic arriving at an ink overlay from its display's
+  // input-catcher window (routed through main).
+  'draw-input': DrawInput
   'cmd': string
   'history': HistoryState
   'pick-tool': Tool | 'mouse'

@@ -19,6 +19,12 @@ canvas {
   touch-action: none;
 }
 
+/* The cursor-highlighter halo layer sits above the ink and never eats pointer
+   events (the overlay window is click-through while it's on). */
+.cursor-highlight {
+  pointer-events: none;
+}
+
 .eyedrop-root {
   position: fixed;
   inset: 0;
@@ -91,6 +97,9 @@ canvas {
 
 .text-editor {
   position: fixed;
+  /* Size is set in px from an exact text measurement, so the box must map those
+     px to the content area (not shrink it by padding/border). */
+  box-sizing: content-box;
   background: transparent;
   border: 1px dashed rgba(128, 128, 128, 0.7);
   border-radius: 3px;
@@ -99,7 +108,6 @@ canvas {
   overflow: hidden;
   padding: 2px;
   margin: 0;
-  min-width: 60px;
   font-weight: 600;
   white-space: pre;
   font-family: 'Segoe UI', system-ui, sans-serif;

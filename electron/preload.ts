@@ -1,8 +1,9 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 
 const SEND = new Set([
-  'overlay-ready', 'toolbar-ready', 'tool-state', 'set-mode',
+  'overlay-ready', 'toolbar-ready', 'input-ready', 'tool-state', 'set-mode', 'set-highlight',
   'cmd', 'history', 'pick-tool', 'adjust-size', 'set-bg', 'screenshot',
+  'draw-input',
   'toggle-hide', 'toggle-toolbar', 'theme', 'quit',
   'draw-start', 'toolbar-drag-start', 'toolbar-drag-move',
   'toolbar-drag-end', 'toolbar-fit-height', 'toolbar-interactive',
@@ -15,6 +16,7 @@ const SEND = new Set([
 ])
 const ON = new Set([
   'tool-state', 'mode', 'bg', 'cmd', 'history',
+  'highlight', 'highlight-pointer', 'highlight-press', 'draw-input',
   'pick-tool', 'adjust-size', 'hidden',
   'theme', 'close-menus', 'screenshotting',
   'tooltip-side', 'set-theme', 'settings-state', 'hotkeys', 'update-badge', 'eyedrop'

@@ -8,6 +8,7 @@ import {
   Highlighter,
   Minus,
   MousePointer2,
+  MousePointerClick,
   Move,
   PanelTop,
   Pen,
@@ -151,6 +152,7 @@ export default function Toolbar(): React.JSX.Element {
   const [fadeMs, setFadeMs] = useState(saved.fadeMs ?? 2000);
   const [theme, setTheme] = useState<Theme>(saved.theme ?? "system");
   const [mode, setMode] = useState(false);
+  const [highlight, setHighlight] = useState(false);
   const [bg, setBg] = useState<Bg>("none");
   const [, setHidden] = useState(false);
   const [hist, setHist] = useState<HistoryState>({
@@ -176,12 +178,15 @@ export default function Toolbar(): React.JSX.Element {
   useEffect(() => {
     const offs = [
       window.openpen.on("mode", setMode),
+      window.openpen.on("highlight", setHighlight),
       window.openpen.on("bg", setBg),
       window.openpen.on("hidden", setHidden),
       window.openpen.on("history", setHist),
       window.openpen.on("pick-tool", (t) => {
-        if (t === "mouse") window.openpen.send("set-mode", false);
-        else {
+        if (t === "mouse") {
+          window.openpen.send("set-highlight", false);
+          window.openpen.send("set-mode", false);
+        } else {
           setTool(t);
           window.openpen.send("set-mode", true);
         }
@@ -351,13 +356,29 @@ export default function Toolbar(): React.JSX.Element {
 
           <Tip label="Mouse mode" keys={hk("mouseMode")}>
             <Button
-              variant={!mode ? "default" : "ghost"}
+              variant={!mode && !highlight ? "default" : "ghost"}
               size="icon"
               className="h-7 w-full shrink-0 rounded-sm [&_svg]:size-3.5"
               aria-label="Mouse mode"
-              onClick={() => window.openpen.send("set-mode", false)}
+              onClick={() => {
+                window.openpen.send("set-highlight", false);
+                window.openpen.send("set-mode", false);
+              }}
             >
               <MousePointer2 />
+            </Button>
+          </Tip>
+
+          <Tip label="Highlight cursor" keys={hk("highlightCursor")}>
+            <Button
+              variant={highlight ? "default" : "ghost"}
+              size="icon"
+              className="h-7 w-full shrink-0 rounded-sm [&_svg]:size-3.5"
+              aria-label="Highlight cursor"
+              aria-pressed={highlight}
+              onClick={() => window.openpen.send("set-highlight", true)}
+            >
+              <MousePointerClick />
             </Button>
           </Tip>
 

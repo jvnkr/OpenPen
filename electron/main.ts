@@ -15,16 +15,22 @@ import {
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL
 const IS_DEV = Boolean(DEV_URL)
+
 const APP_ID = app.isPackaged ? 'dev.openpen.app' : 'dev.openpen.app.dev'
 
 type Bg = 'none' | 'white' | 'black'
 interface ToolState { tool: string; color: string; size: number }
-interface AppState { mode: boolean; bg: Bg; hidden: boolean; toolState: ToolState | null }
+interface AppState { mode: boolean; highlight: boolean; bg: Bg; hidden: boolean; toolState: ToolState | null }
 interface HistoryState { canUndo: boolean; canRedo: boolean }
 interface Settings { protectUi: boolean; hotkeys?: Partial<HotkeyMap>; screenshotDir?: string }
 
 // One overlay per display, keyed by display id.
 const overlays = new Map<number, BrowserWindow>()
+// One input-catcher window per display (visible only in draw mode), keyed by
+// display id, plus a reverse map from webContents id for routing its pointer
+// traffic to the right ink overlay.
+const inputs = new Map<number, BrowserWindow>()
+const inputDisplayByWc = new Map<number, number>()
 // Display currently frozen for the screen eyedropper (one at a time).
 let eyedropDisplayId: number | null = null
 let eyedropCapturing = false
@@ -53,7 +59,7 @@ const TOOLBAR_W = TOOLBAR_PANEL_W + TOOLBAR_GUTTER_W * 2
 const TOOLBAR_TIP_MIN = 190
 const TOOLBAR_H = 720
 // Single source of truth for app-wide state, mirrored to the renderers.
-const state: AppState = { mode: false, bg: 'none', hidden: false, toolState: null }
+const state: AppState = { mode: false, highlight: false, bg: 'none', hidden: false, toolState: null }
 
 // Persisted main-process settings. protectUi excludes the toolbar from screen
 // capture (WDA_EXCLUDEFROMCAPTURE) so OBS recordings and screenshots show ink
@@ -132,6 +138,90 @@ function raiseUiAboveOverlays (): void {
   if (toolbar && !toolbar.isDestroyed()) toolbar.moveTop()
 }
 
+// Put an overlay above the Windows taskbar so ink covers the whole screen. The
+// taskbar sits in the same always-on-top z-band, and a lone moveTop() can land
+// under it; toggling always-on-top off→on re-inserts the window at the very top
+// of that band, which reliably clears the taskbar.
+function raiseOverlayTopmost (win: BrowserWindow): void {
+  if (win.isDestroyed()) return
+  win.setAlwaysOnTop(false)
+  win.setAlwaysOnTop(true, 'screen-saver')
+  win.moveTop()
+}
+
+// One-shot raises keep losing to the shell: Windows re-raises the taskbar above
+// the rest of the topmost band on every foreground change (and on taskbar
+// notifications), and there's no event to react to. So whenever ink is visible —
+// in every mode, so strokes drawn over the taskbar stay visible after leaving
+// draw mode too — keep winning the fight: re-assert the overlays (input catchers
+// above them in draw mode, OpenPen's UI on top) a few times a second. moveTop()
+// puts a topmost window at the top of its band, cheap and churn-free when it's
+// already there. Paused during an eyedrop, which deliberately raises a frozen
+// overlay above the UI windows so the whole screen stays sample-able.
+let raiseWatchdog: NodeJS.Timeout | null = null
+function updateRaiseWatchdog (): void {
+  const want = !state.hidden
+  if (want && !raiseWatchdog) {
+    raiseWatchdog = setInterval(() => {
+      if (eyedropDisplayId !== null || eyedropCapturing) return
+      for (const win of overlays.values()) {
+        if (!win.isDestroyed()) win.moveTop()
+      }
+      if (state.mode) {
+        for (const win of inputs.values()) {
+          if (!win.isDestroyed() && win.isVisible()) win.moveTop()
+        }
+      }
+      raiseUiAboveOverlays()
+    }, 300)
+  } else if (!want && raiseWatchdog) {
+    clearInterval(raiseWatchdog)
+    raiseWatchdog = null
+  }
+}
+
+// The shell re-asserts the taskbar shortly AFTER an activation change, so a
+// single synchronous raise can lose the race. Fire a short burst of re-raises
+// around the two unavoidable focus transitions (text session start/end) to keep
+// any taskbar pop to a frame or two instead of a 300ms watchdog gap.
+function raiseBurst (): void {
+  for (const delay of [40, 120, 250]) {
+    setTimeout(() => {
+      if (eyedropDisplayId !== null || eyedropCapturing) return
+      for (const win of overlays.values()) {
+        if (!win.isDestroyed()) win.moveTop()
+      }
+      if (state.mode) {
+        for (const win of inputs.values()) {
+          if (!win.isDestroyed() && win.isVisible()) win.moveTop()
+        }
+      }
+      raiseUiAboveOverlays()
+    }, delay)
+  }
+}
+
+// The overlay currently holding keyboard focus for the text tool. Focus is held
+// across text boxes (each acquire/release flips activation, which makes the
+// shell flash the taskbar over fullscreen apps) and released only when the text
+// session truly ends: tool change, draw-mode exit, or hiding the ink.
+let textFocusWin: BrowserWindow | null = null
+
+function releaseTextFocus (): void {
+  const win = textFocusWin
+  textFocusWin = null
+  if (!win || win.isDestroyed()) return
+  win.setFocusable(false)
+  if (win.isFocused()) win.blur()
+  // The blur is an activation change: the shell promotes the taskbar to topmost
+  // in response, and blurring can also drop the transparent overlay's composited
+  // ink. Re-assert with the full off→on toggle and force a repaint.
+  raiseOverlayTopmost(win)
+  win.webContents.invalidate()
+  raiseUiAboveOverlays()
+  raiseBurst()
+}
+
 function load (win: BrowserWindow, page: string): void {
   if (DEV_URL) win.loadURL(`${DEV_URL}/${page}.html`)
   else win.loadFile(path.join(__dirname, '..', 'dist', `${page}.html`))
@@ -154,6 +244,54 @@ function overlayAtCursor (): BrowserWindow | null {
   return overlays.get(displayAtCursor().id) ?? overlays.values().next().value ?? null
 }
 
+// Every overlay/catcher window gets its OWN hidden owner window. Ownership keeps
+// them out of Alt-Tab without the toolwindow style (which the shell pins the
+// taskbar above) — but the owner must not be shared: attaching a second owned
+// window to the same owner strips the existing sibling's WS_EX_TOPMOST
+// (measured — the ink overlay silently lost its topmost bit the instant the
+// input catcher was created, and no later heal works because Electron's cached
+// always-on-top state says the flag is still set). One owner per window
+// isolates them completely.
+function createHiddenOwner (): BrowserWindow {
+  return new BrowserWindow({
+    width: 1,
+    height: 1,
+    show: false,
+    frame: false,
+    transparent: true,
+    skipTaskbar: true,
+    focusable: false
+  })
+}
+
+// Destroy a window together with its private hidden owner.
+function destroyWithOwner (win: BrowserWindow | undefined): void {
+  if (!win || win.isDestroyed()) return
+  const owner = win.getParentWindow()
+  win.destroy()
+  if (owner && !owner.isDestroyed()) owner.destroy()
+}
+
+// Electron clamps non-resizable windows to the display's WORK AREA (monitor
+// minus taskbar) — both at construction and on setBounds — so a full-monitor
+// overlay silently ends at the taskbar's top edge and ink "clips" there. The
+// same trick fitToolbarHeight uses unclamps it: briefly resizable around the
+// setBounds. (Epic Pen's draw surface is exactly monitor-sized too; full size is
+// safe here because these windows are never focused and never opaque, so the
+// shell's fullscreen-app handling and occlusion throttling don't kick in.)
+function setBoundsUnclamped (win: BrowserWindow, b: Electron.Rectangle): void {
+  win.setResizable(true)
+  win.setBounds(b)
+  win.setResizable(false)
+  // Toggling resizable on Windows silently strips the native always-on-top bit
+  // (measured: the input catcher ran with WS_EX_TOPMOST unset, so the taskbar —
+  // which the shell promotes to topmost on activation changes — beat it for
+  // good). Re-assert with a real off→on toggle; a plain set can no-op because
+  // Electron still believes the flag is on.
+  win.setAlwaysOnTop(false)
+  win.setAlwaysOnTop(true, 'screen-saver')
+}
+
 function createOverlay (d: Display, index: number): void {
   const b = d.bounds
   const win = new BrowserWindow({
@@ -169,19 +307,38 @@ function createOverlay (d: Display, index: number): void {
     // the app behind, so games keep receiving keyboard input while you draw.
     // Focus is granted temporarily for text editing (see 'text-editing' IPC).
     focusable: false,
-    type: 'toolbar', // keeps it out of alt-tab on Windows
+    // Owned (not a toolwindow): out of Alt-Tab via ownership, yet still eligible
+    // to sit above the taskbar (the shell pins the taskbar above toolwindows) —
+    // see createHiddenOwner for why each window gets its own owner.
+    parent: createHiddenOwner(),
     webPreferences: { preload: path.join(__dirname, 'preload.js') }
   })
   win.setAlwaysOnTop(true, 'screen-saver')
-  win.setIgnoreMouseEvents(!state.mode, { forward: false })
+  // The constructor clamped the height to the work area; unclamp to the true
+  // monitor bounds so ink can cover the taskbar.
+  setBoundsUnclamped(win, b)
+  // Permanently click-through: a click-through window is never counted as
+  // occluding the apps behind it, so videos/games keep playing under the ink.
+  // Pointer input comes from the input-catcher window instead (createInput);
+  // the only exceptions are text editing and the eyedropper, which flip this
+  // temporarily because their UI lives in this window.
+  win.setIgnoreMouseEvents(true, { forward: false })
+  // Order matters: flipping click-through after the resizable dance strips the
+  // native topmost bit again (measured), so the real raise comes after both.
+  raiseOverlayTopmost(win)
   win.setMenu(null)
   // Stable title so OBS window-capture users can find the overlay per display.
   const title = index === 0 ? 'OpenPen Overlay' : `OpenPen Overlay ${index + 1}`
   win.on('page-title-updated', ev => ev.preventDefault())
   win.setTitle(title)
-  // Windows keeps all always-on-top windows in one z-band, so focusing an
-  // overlay raises it above OpenPen's UI — re-raise the UI windows every time.
-  win.on('focus', raiseUiAboveOverlays)
+  // Activating a window makes the Windows shell re-raise the taskbar above the
+  // rest of the topmost band, so when the overlay does take focus (text editing —
+  // it's otherwise non-activating) immediately re-raise it, then OpenPen's UI
+  // above it (all topmost windows share one z-band, so focusing buried the UI).
+  win.on('focus', () => {
+    win.moveTop()
+    raiseUiAboveOverlays()
+  })
   load(win, 'overlay')
   win.once('ready-to-show', () => {
     if (!state.hidden) win.showInactive()
@@ -189,16 +346,71 @@ function createOverlay (d: Display, index: number): void {
   overlays.set(d.id, win)
 }
 
+// The nearly-invisible input catcher for one display, stacked just above the ink
+// overlay while draw mode is on. It takes the real pointer events (the ink
+// window is permanently click-through) and forwards them over 'draw-input'. The
+// opacity trick is the crux: a plain window at 1/255 alpha still receives every
+// click, but Windows classifies it as see-through — the apps behind are never
+// occlusion-throttled (background video keeps playing) and the shell never
+// applies its fullscreen-app handling to it.
+function createInput (d: Display): void {
+  const b = d.bounds
+  const win = new BrowserWindow({
+    x: b.x, y: b.y, width: b.width, height: b.height,
+    frame: false,
+    resizable: false,
+    movable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    show: false,
+    // Non-activating, like the ink overlay: clicks that draw never take keyboard
+    // focus away from the app behind.
+    focusable: false,
+    backgroundColor: '#000000',
+    opacity: 1 / 255,
+    parent: createHiddenOwner(),
+    webPreferences: { preload: path.join(__dirname, 'preload.js') }
+  })
+  win.setAlwaysOnTop(true, 'screen-saver')
+  // Same work-area unclamp as the ink overlay: the catcher must cover the
+  // taskbar too, or strokes over it fall through to the real taskbar.
+  setBoundsUnclamped(win, b)
+  win.setMenu(null)
+  win.on('page-title-updated', ev => ev.preventDefault())
+  win.setTitle('OpenPen Input')
+  load(win, 'input')
+  win.once('ready-to-show', () => {
+    // A display hot-plugged while drawing should join the active draw session.
+    if (state.mode && !state.hidden) {
+      win.showInactive()
+      raiseOverlayTopmost(win)
+      raiseUiAboveOverlays()
+    }
+  })
+  inputs.set(d.id, win)
+  inputDisplayByWc.set(win.webContents.id, d.id)
+}
+
 function createOverlays (): void {
-  screen.getAllDisplays().forEach((d, i) => createOverlay(d, i))
+  screen.getAllDisplays().forEach((d, i) => {
+    createOverlay(d, i)
+    createInput(d)
+  })
 }
 
 function destroyOverlay (displayId: number): void {
   const win = overlays.get(displayId)
   overlays.delete(displayId)
   if (win && !win.isDestroyed()) {
+    if (textFocusWin === win) textFocusWin = null
     overlayHistory.delete(win.webContents.id)
-    win.destroy()
+    destroyWithOwner(win)
+  }
+  const input = inputs.get(displayId)
+  inputs.delete(displayId)
+  if (input && !input.isDestroyed()) {
+    inputDisplayByWc.delete(input.webContents.id)
+    destroyWithOwner(input)
   }
   pushHistory()
 }
@@ -322,7 +534,9 @@ function openSettings (): void {
 function fitOverlays (): void {
   for (const d of screen.getAllDisplays()) {
     const win = overlays.get(d.id)
-    if (win && !win.isDestroyed()) win.setBounds(d.bounds)
+    if (win && !win.isDestroyed()) setBoundsUnclamped(win, d.bounds)
+    const input = inputs.get(d.id)
+    if (input && !input.isDestroyed()) setBoundsUnclamped(input, d.bounds)
   }
 }
 
@@ -345,7 +559,9 @@ function repaintOverlayCursor (win: BrowserWindow | null): void {
 
 // Exiting draw mode leaves a stale crosshair until the mouse moves; repaint the
 // (now default) cursor on the overlay under the pointer while it still receives
-// events, then flip every overlay back to click-through.
+// events, then flip every overlay back to click-through. Drawing may have taken
+// focus (the overlay is focusable so ink can cover the taskbar), so hand keyboard
+// focus back to the app underneath on the way out.
 function enterMouseMode (): void {
   for (const win of overlays.values()) repaintOverlayCursor(win)
   // Let Chromium process the synthetic move (and repaint the OS cursor) before
@@ -354,6 +570,7 @@ function enterMouseMode (): void {
     for (const win of overlays.values()) {
       if (win.isDestroyed()) continue
       win.setIgnoreMouseEvents(true, { forward: false })
+      if (win.isFocused()) win.blur()
     }
   }, 16)
 }
@@ -394,7 +611,147 @@ function updateGlobalEditShortcuts (): void {
   }
 }
 
+// --- Cursor highlighter ------------------------------------------------------
+// A click-through presentation aid (Epic-Pen style) and a variant of mouse mode:
+// the overlays stay pass-through so you keep using the apps underneath, while a
+// halo follows the real cursor. On the primary button the halo pulses — it
+// contracts on press and swells+fades on release (Epic Pen's click feedback) —
+// and Ctrl+Shift+wheel resizes it. The halo position is polled from the OS cursor
+// (DIP coords, DPI-safe, works even if the native hook is unavailable) and
+// forwarded to the overlay under the cursor; the button/wheel input is read from a
+// lazily-loaded global hook (uiohook-napi) so it registers while the overlay
+// ignores mouse events.
+interface HookMouseEvent { button: number }
+interface HookWheelEvent { rotation: number; ctrlKey: boolean; shiftKey: boolean }
+interface Uiohook {
+  on (event: 'mousedown' | 'mouseup', cb: (e: HookMouseEvent) => void): void
+  on (event: 'wheel', cb: (e: HookWheelEvent) => void): void
+  start (): void
+  stop (): void
+}
+let uiohook: Uiohook | null = null
+let uiohookRunning = false
+let hookListenerAttached = false
+let highlightPoll: NodeJS.Timeout | null = null
+let highlightDisplayId: number | null = null
+
+// Only the primary button drives the pulse — libuiohook numbers it 1. Right /
+// middle clicks (context menus, paste) shouldn't flash the ring mid-presentation.
+// Press/release are broadcast to every overlay so a click-drag that crosses
+// displays still resolves cleanly (only the overlay under the cursor paints it).
+function onGlobalMouseDown (e: HookMouseEvent): void {
+  if (!state.highlight || Number(e.button) !== 1) return
+  sendOverlays('highlight-press', true)
+}
+
+function onGlobalMouseUp (e: HookMouseEvent): void {
+  if (!state.highlight || Number(e.button) !== 1) return
+  sendOverlays('highlight-press', false)
+}
+
+// Ctrl+Shift+wheel resizes the brush/halo. The modifiers keep plain scrolling
+// free to reach the app underneath (the overlay is pass-through here). Routed
+// through the toolbar, which owns and clamps the size and rebroadcasts it.
+function onGlobalWheel (e: HookWheelEvent): void {
+  if (!state.highlight || !e.ctrlKey || !e.shiftKey) return
+  // libuiohook reports a negative rotation for scroll-up here; scrolling up grows.
+  send(toolbar, 'adjust-size', e.rotation > 0 ? -1 : 1)
+}
+
+// Start (once) the global hook that reads clicks and the wheel anywhere on
+// screen. It's loaded on first use and guarded: if the native module is missing
+// the halo still follows the cursor, only the pulse and wheel-resize are skipped.
+async function startMouseHook (): Promise<void> {
+  if (uiohookRunning) return
+  try {
+    if (!uiohook) {
+      const mod = await import('uiohook-napi') as unknown as { uIOhook?: Uiohook, default?: { uIOhook?: Uiohook } }
+      uiohook = mod.uIOhook ?? mod.default?.uIOhook ?? null
+    }
+    if (!uiohook) return
+    if (!hookListenerAttached) {
+      uiohook.on('mousedown', onGlobalMouseDown)
+      uiohook.on('mouseup', onGlobalMouseUp)
+      uiohook.on('wheel', onGlobalWheel)
+      hookListenerAttached = true
+    }
+    uiohook.start()
+    uiohookRunning = true
+  } catch (err) {
+    console.error('cursor highlighter: global mouse hook unavailable', err)
+  }
+}
+
+function stopMouseHook (): void {
+  if (!uiohookRunning || !uiohook) return
+  try {
+    uiohook.stop()
+  } catch (err) {
+    console.error('cursor highlighter: failed to stop mouse hook', err)
+  }
+  uiohookRunning = false
+}
+
+// Forward the live cursor position to the overlay on the display it's over, and
+// hide the halo on the display it just left.
+function pushHighlightPointer (): void {
+  const p = screen.getCursorScreenPoint()
+  const d = screen.getDisplayNearestPoint(p)
+  if (highlightDisplayId !== d.id) {
+    if (highlightDisplayId !== null) {
+      const prev = overlays.get(highlightDisplayId)
+      if (prev && !prev.isDestroyed()) send(prev, 'highlight-pointer', null)
+    }
+    highlightDisplayId = d.id
+  }
+  const win = overlays.get(d.id)
+  if (win && !win.isDestroyed()) {
+    send(win, 'highlight-pointer', { x: p.x - d.bounds.x, y: p.y - d.bounds.y })
+  }
+}
+
+function startHighlightTracking (): void {
+  if (!highlightPoll) highlightPoll = setInterval(pushHighlightPointer, 8)
+  void startMouseHook()
+}
+
+function stopHighlightTracking (): void {
+  if (highlightPoll) {
+    clearInterval(highlightPoll)
+    highlightPoll = null
+  }
+  if (highlightDisplayId !== null) {
+    const win = overlays.get(highlightDisplayId)
+    if (win && !win.isDestroyed()) send(win, 'highlight-pointer', null)
+    highlightDisplayId = null
+  }
+  stopMouseHook()
+}
+
+function setHighlight (on: boolean): void {
+  // Highlight is a mouse-mode variant, so turning it on drops out of draw mode.
+  if (on && state.mode) setDrawMode(false)
+  if (state.highlight === on) {
+    if (on) startHighlightTracking()
+    return
+  }
+  state.highlight = on
+  if (on) {
+    if (state.hidden) setHidden(false)
+    // Keep the (click-through) overlays above everything — taskbar included — so
+    // the halo paints over the whole screen, then put OpenPen's UI back on top.
+    for (const win of overlays.values()) raiseOverlayTopmost(win)
+    raiseUiAboveOverlays()
+    startHighlightTracking()
+  } else {
+    stopHighlightTracking()
+  }
+  updateRaiseWatchdog()
+  broadcast('highlight', state.highlight)
+}
+
 function setDrawMode (on: boolean): void {
+  if (on) setHighlight(false)
   state.mode = on
   if (state.mode && state.hidden) setHidden(false)
   if (mouseModeFallback) {
@@ -403,20 +760,32 @@ function setDrawMode (on: boolean): void {
   }
   broadcast('mode', state.mode)
   updateGlobalEditShortcuts()
+  updateRaiseWatchdog()
   if (state.mode) {
     for (const win of overlays.values()) {
       if (win.isDestroyed()) continue
-      win.setIgnoreMouseEvents(false, { forward: false })
-      // The Windows taskbar lives in the same topmost z-band and covers us
-      // whenever it was raised last (e.g. after the user clicked it). Re-assert
-      // topmost on every draw-mode entry so ink can go over the taskbar too.
-      win.setAlwaysOnTop(true, 'screen-saver')
-      win.moveTop()
+      // Re-assert topmost on entry so ink covers the taskbar too (it shares the
+      // topmost band and wins ties by being raised last).
+      raiseOverlayTopmost(win)
     }
-    // Deliberately no focus() here: overlays are non-activating so the app the
-    // user was in keeps keyboard focus while they draw.
+    // The ink overlays stay click-through even while drawing; the input catchers
+    // shown just above them take the pointer instead. Nothing gets focused, so
+    // the app underneath keeps keyboard input (and keeps playing) as you draw.
+    // Full topmost re-assert, not a bare moveTop: the taskbar may have been
+    // promoted to topmost since, and a catcher missing its bit loses forever.
+    for (const win of inputs.values()) {
+      if (win.isDestroyed()) continue
+      win.showInactive()
+      raiseOverlayTopmost(win)
+    }
     raiseUiAboveOverlays()
   } else {
+    // Leaving draw mode ends any text session: hand the keyboard back to the
+    // app underneath (this commits an open edit via the textarea's blur).
+    releaseTextFocus()
+    for (const win of inputs.values()) {
+      if (!win.isDestroyed()) win.hide()
+    }
     mouseModeFallback = setTimeout(() => {
       enterMouseMode()
       mouseModeFallback = null
@@ -427,14 +796,19 @@ function setDrawMode (on: boolean): void {
 
 function setHidden (hidden: boolean): void {
   state.hidden = hidden
+  if (hidden) releaseTextFocus()
   for (const win of overlays.values()) {
     if (win.isDestroyed()) continue
     if (state.hidden) win.hide()
     else win.showInactive()
   }
   if (state.hidden && state.mode) setDrawMode(false)
+  // Hiding the ink hides the halo's canvas too, so keeping highlight "on" would
+  // just leave the cursor poll + global mouse hook running invisibly.
+  if (state.hidden && state.highlight) setHighlight(false)
   broadcast('hidden', state.hidden)
   updateGlobalEditShortcuts()
+  updateRaiseWatchdog()
 }
 
 function toggleBg (c: Bg): void {
@@ -491,11 +865,11 @@ async function hideUiForFreeze (): Promise<() => void> {
   return () => { if (!alreadyProtected) applyUiCaptureProtection() }
 }
 
-// Hand a frozen overlay back to normal input: stop capturing mouse events
-// (unless still drawing) and repaint the OS cursor when returning to mouse mode.
-// The exit tail of an eyedropper session.
+// Hand a frozen overlay back to click-through (the input catchers own the
+// pointer again; the resumed watchdog re-stacks them above the ink) and repaint
+// the OS cursor when returning to mouse mode. The exit tail of an eyedropper.
 function restoreOverlayInput (win: BrowserWindow | undefined): void {
-  if (win && !win.isDestroyed()) win.setIgnoreMouseEvents(!state.mode, { forward: false })
+  if (win && !win.isDestroyed()) win.setIgnoreMouseEvents(true, { forward: false })
   if (!state.mode) enterMouseMode()
 }
 
@@ -852,7 +1226,8 @@ function setHotkeyCapture (on: boolean): void {
 function hotkeyHandlers (map: HotkeyMap): HotkeyHandler[] {
   const handlers: HotkeyHandler[] = [
     { action: 'toggleDraw', accel: map.toggleDraw, fn: () => setDrawMode(!state.mode) },
-    { action: 'mouseMode', accel: map.mouseMode, fn: () => setDrawMode(false) },
+    { action: 'mouseMode', accel: map.mouseMode, fn: () => { setHighlight(false); setDrawMode(false) } },
+    { action: 'highlightCursor', accel: map.highlightCursor, fn: () => setHighlight(!state.highlight) },
     { action: 'clear', accel: map.clear, fn: () => runCmd('clear') },
     { action: 'undo', accel: map.undo, fn: () => runCmd('undo') },
     { action: 'redo', accel: map.redo, fn: () => runCmd('redo') },
@@ -879,30 +1254,35 @@ function unregisterConfigurableShortcuts (): void {
   registeredAccelerators = []
 }
 
-function registerConfigurableShortcuts (): boolean {
+// Best-effort: register every bound hotkey and return the accelerators that
+// could not be grabbed (typically already taken by another app). One stolen
+// shortcut must not cost all the others — at startup the app previously rolled
+// back EVERY hotkey when a single register failed, leaving it silently
+// shortcut-dead. Failures are logged and reported to the settings UI instead.
+function registerConfigurableShortcuts (): string[] {
   unregisterConfigurableShortcuts()
+  const failed: string[] = []
   const registered: string[] = []
   for (const { accel, fn } of hotkeyHandlers(hotkeys)) {
-    if (!globalShortcut.register(accel, fn)) {
-      for (const a of registered) globalShortcut.unregister(a)
-      registeredAccelerators = []
-      return false
-    }
-    registered.push(accel)
+    let ok: boolean
+    try { ok = globalShortcut.register(accel, fn) } catch { ok = false }
+    if (ok) registered.push(accel)
+    else failed.push(accel)
   }
   registeredAccelerators = registered
-  return true
+  if (failed.length > 0) console.error('hotkeys not registered:', failed.join(', '))
+  return failed
 }
 
 function applyHotkeys (): string | null {
   const previous = { ...hotkeys }
-  if (registerConfigurableShortcuts()) {
+  if (registerConfigurableShortcuts().length === 0) {
     hotkeyError = null
     refreshTray()
     return null
   }
   hotkeys = previous
-  if (!registerConfigurableShortcuts()) {
+  if (registerConfigurableShortcuts().length > 0) {
     console.error('failed to restore hotkeys after registration error')
   }
   return 'That shortcut could not be registered. It may already be in use by another app.'
@@ -960,6 +1340,7 @@ function wireIpc (): void {
   ipcMain.on('overlay-ready', e => {
     if (state.toolState) e.sender.send('tool-state', state.toolState)
     e.sender.send('mode', state.mode)
+    e.sender.send('highlight', state.highlight)
     e.sender.send('bg', state.bg)
   })
   ipcMain.on('overlay-cursor-ready', () => {
@@ -975,6 +1356,7 @@ function wireIpc (): void {
   })
   ipcMain.on('toolbar-ready', () => {
     send(toolbar, 'mode', state.mode)
+    send(toolbar, 'highlight', state.highlight)
     send(toolbar, 'bg', state.bg)
     send(toolbar, 'hidden', state.hidden)
     updateTooltipSide()
@@ -984,31 +1366,78 @@ function wireIpc (): void {
   })
   ipcMain.on('tool-state', (_e, s: ToolState) => {
     state.toolState = s
+    // Switching away from the text tool ends the held-focus text session (size
+    // and colour tweaks keep the tool, so they keep the keyboard too).
+    if (s.tool !== 'text') releaseTextFocus()
     sendOverlays('tool-state', s)
+    for (const win of inputs.values()) send(win, 'tool-state', s)
+    // A tool change swaps the input catcher's cursor, but Windows only repaints
+    // the OS cursor on real input — nudge the catcher under the pointer so the
+    // new cursor shows without waiting for the mouse to move.
+    if (state.mode) repaintOverlayCursor(inputs.get(displayAtCursor().id) ?? null)
+  })
+  ipcMain.on('input-ready', e => {
+    if (state.toolState) e.sender.send('tool-state', state.toolState)
+  })
+  // Pointer traffic from an input catcher → the ink overlay on the same display.
+  ipcMain.on('draw-input', (e, payload: unknown) => {
+    const displayId = inputDisplayByWc.get(e.sender.id)
+    if (displayId === undefined) return
+    send(overlays.get(displayId) ?? null, 'draw-input', payload)
+    // Starting a stroke closes any open toolbar menu, same as the overlay's own
+    // draw-start did when it still received the pointer directly.
+    if (typeof payload === 'object' && payload !== null && (payload as { t?: unknown }).t === 'down') {
+      send(toolbar, 'close-menus')
+    }
   })
   // Drawing on a canvas asks the toolbar to close any open menu (its own
   // outside-press can't see clicks that land in another window).
   ipcMain.on('draw-start', () => send(toolbar, 'close-menus'))
   ipcMain.on('set-mode', (_e, on: boolean) => setDrawMode(on))
-  // Overlays are non-activating so drawing never steals focus, but the text
-  // editor needs the keyboard: grant focus for the edit's duration only, then
-  // hand it back to the window below.
+  ipcMain.on('set-highlight', (_e, on: boolean) => setHighlight(on))
+  // Overlays are non-activating so drawing never steals focus; the text editor
+  // is the exception. Focus is acquired for the FIRST text box and then held for
+  // the whole text-tool session (released on tool change / mode exit / hide, see
+  // releaseTextFocus) — every focus flip makes the shell re-assert the taskbar
+  // (a visible flash over fullscreen apps), so placing many texts in a row must
+  // not acquire/release per box.
   ipcMain.on('text-editing', (e, on: boolean) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win || win.isDestroyed()) return
     if (on) {
-      win.setFocusable(true)
-      win.focus()
+      // The ink overlay is normally click-through with the input catchers on
+      // top; the textarea needs both mouse and keyboard, so drop the catchers
+      // out of the way and make the overlay interactive for the edit.
+      for (const iw of inputs.values()) {
+        if (!iw.isDestroyed()) iw.hide()
+      }
+      win.setIgnoreMouseEvents(false, { forward: false })
+      if (textFocusWin !== win || !win.isFocused()) {
+        // A plain focus() is blocked by the Windows foreground lock once
+        // OpenPen is in the background, hence show() + moveTop too.
+        if (textFocusWin && textFocusWin !== win && !textFocusWin.isDestroyed()) {
+          textFocusWin.setFocusable(false)
+        }
+        win.setFocusable(true)
+        win.moveTop()
+        win.show()
+        win.focus()
+        raiseBurst()
+      }
+      textFocusWin = win
     } else {
-      win.setFocusable(false)
-      if (win.isFocused()) win.blur()
-      // Clearing focusability + blurring knocks the transparent overlay out of
-      // the topmost z-band on Windows and drops its composited ink, so the text
-      // just typed appears to vanish. Re-assert topmost and force a repaint —
-      // the same treatment draw-mode entry gives after its focus changes — then
-      // put OpenPen's own UI back above the overlay.
-      win.setAlwaysOnTop(true, 'screen-saver')
-      win.moveTop()
+      // Keep the keyboard (no blur — that's the other half of the taskbar
+      // flash); just hand the pointer back to the catchers.
+      win.setIgnoreMouseEvents(true, { forward: false })
+      raiseOverlayTopmost(win)
+      if (state.mode && !state.hidden) {
+        for (const iw of inputs.values()) {
+          if (!iw.isDestroyed()) {
+            iw.showInactive()
+            raiseOverlayTopmost(iw)
+          }
+        }
+      }
       win.webContents.invalidate()
       raiseUiAboveOverlays()
     }
@@ -1118,11 +1547,23 @@ if (!app.requestSingleInstanceLock()) {
     registerConfigurableShortcuts()
     wireIpc()
     initAutoUpdate()
+    // Ink must sit above the taskbar from the start (mouse mode included).
+    updateRaiseWatchdog()
     screen.on('display-metrics-changed', () => { fitOverlays(); updateTooltipSide() })
-    screen.on('display-added', (_e, d) => createOverlay(d, overlays.size))
+    screen.on('display-added', (_e, d) => {
+      createOverlay(d, overlays.size)
+      createInput(d)
+    })
     screen.on('display-removed', (_e, d) => destroyOverlay(d.id))
   })
 
   app.on('window-all-closed', () => app.quit())
-  app.on('will-quit', () => globalShortcut.unregisterAll())
+  app.on('will-quit', () => {
+    globalShortcut.unregisterAll()
+    stopHighlightTracking()
+    if (raiseWatchdog) {
+      clearInterval(raiseWatchdog)
+      raiseWatchdog = null
+    }
+  })
 }
