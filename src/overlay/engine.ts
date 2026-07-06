@@ -448,6 +448,22 @@ export class Engine {
       (this.dragging && this.dragPointer === pointerId)
   }
 
+  // Wheel-resizing mid-gesture: live ops are re-rendered from their data every
+  // repaint, so updating the op's size re-inks the whole in-progress stroke or
+  // shape at the new width. An in-progress erase keeps its pick tolerance in
+  // step the same way.
+  setLiveSize (size: number): void {
+    if (this.erasing) this.eraseSize = size
+    let changed = false
+    for (const op of this.live.values()) {
+      if (op.size !== size) {
+        op.size = size
+        changed = true
+      }
+    }
+    if (changed) this.scheduleRepaint()
+  }
+
   // Toggle Epic-Pen-style fading ink and set how long a stroke lives (ms) before
   // it's fully gone. Turning it off leaves anything already fading to finish.
   setFadeMode (on: boolean, durMs = this.fadeDur): void {

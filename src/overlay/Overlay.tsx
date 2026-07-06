@@ -76,7 +76,13 @@ export default function Overlay (): React.JSX.Element {
     window.addEventListener('resize', fit)
 
     const offs = [
-      window.openpen.on('tool-state', s => setTool(s)),
+      // Feed size changes into any stroke currently being drawn, so wheeling
+      // mid-stroke resizes the ink under the cursor live instead of only
+      // affecting the next stroke.
+      window.openpen.on('tool-state', s => {
+        setTool(s)
+        eng.setLiveSize(s.size)
+      }),
       window.openpen.on('mode', m => {
         if (!m) commitEditRef.current(false)
         setMode(m)

@@ -149,56 +149,114 @@ function raiseOverlayTopmost (win: BrowserWindow): void {
   win.moveTop()
 }
 
-// One-shot raises keep losing to the shell: Windows re-raises the taskbar above
-// the rest of the topmost band on every foreground change (and on taskbar
-// notifications), and there's no event to react to. So whenever ink is visible —
-// in every mode, so strokes drawn over the taskbar stay visible after leaving
-// draw mode too — keep winning the fight: re-assert the overlays (input catchers
-// above them in draw mode, OpenPen's UI on top) a few times a second. moveTop()
-// puts a topmost window at the top of its band, cheap and churn-free when it's
-// already there. Paused during an eyedrop, which deliberately raises a frozen
-// overlay above the UI windows so the whole screen stays sample-able.
-let raiseWatchdog: NodeJS.Timeout | null = null
-function updateRaiseWatchdog (): void {
-  const want = !state.hidden
-  if (want && !raiseWatchdog) {
-    raiseWatchdog = setInterval(() => {
-      if (eyedropDisplayId !== null || eyedropCapturing) return
-      for (const win of overlays.values()) {
-        if (!win.isDestroyed()) win.moveTop()
+// --- Topmost reflex ----------------------------------------------------------
+// The shell promotes the taskbar to the top of the topmost band after every
+// activation change (window switches, taskbar clicks, Alt-Tab); there is no OS
+// event to react to. The old fix — re-raising every window on a 300ms interval —
+// was itself visible: each tick lifted the ink above the toolbar for a moment
+// before the UI was raised back, and whenever DWM composed a frame inside that
+// gap the ink blinked across the toolbar. So: no polling. Activation changes can
+// only follow user input, and the uiohook global hook (already shipped for the
+// cursor highlighter) hears all of it. A raise runs shortly after any global
+// mouse-down or an Alt/Win key release — coalesced, and skipped while a stroke
+// is in progress, since those clicks landed on OUR input catcher and can't have
+// activated anything. An idle screen never reorders at all.
+
+// In-flight draw gestures ("displayId:pointerId"), fed by the draw-input router,
+// so the reflex can hold its fire until the stroke ends.
+const liveGestures = new Set<string>()
+let raiseTimers: NodeJS.Timeout[] = []
+let raiseSuppressed = false
+// Slow fallback watchdog, used only when the native hook can't load (e.g. no
+// prebuild for this CPU). Degraded platforms keep taskbar recovery, with the
+// old interval behaviour.
+let raiseFallback: NodeJS.Timeout | null = null
+
+// One repair pass, bottom-up: ink to the top of the band, each catcher directly
+// above its own ink window (moveAbove, not moveTop, so catchers never leapfrog
+// the UI), then OpenPen's UI back on top. Paused during an eyedrop, which
+// deliberately raises a frozen overlay above the UI windows so the whole screen
+// stays sample-able.
+function raiseStack (): void {
+  if (eyedropDisplayId !== null || eyedropCapturing || state.hidden) return
+  for (const [id, win] of overlays) {
+    if (win.isDestroyed()) continue
+    win.moveTop()
+    const input = inputs.get(id)
+    if (state.mode && input && !input.isDestroyed() && input.isVisible()) {
+      try {
+        input.moveAbove(win.getMediaSourceId())
+      } catch {
+        input.moveTop()
       }
-      if (state.mode) {
-        for (const win of inputs.values()) {
-          if (!win.isDestroyed() && win.isVisible()) win.moveTop()
-        }
+    }
+  }
+  raiseUiAboveOverlays()
+}
+
+// The taskbar promotion lands shortly AFTER the input event that caused it, so
+// raise on a short delay, and once more in case the shell was slow. New
+// triggers reset the pending batch.
+function scheduleRaise (): void {
+  if (state.hidden) return
+  for (const t of raiseTimers) clearTimeout(t)
+  raiseTimers = [60, 250].map(delay => setTimeout(() => {
+    if (liveGestures.size > 0) {
+      raiseSuppressed = true
+      return
+    }
+    raiseStack()
+  }, delay))
+}
+
+// A stroke finished: run any raise that was held while it was live.
+function gestureEnded (key: string): void {
+  liveGestures.delete(key)
+  if (liveGestures.size === 0 && raiseSuppressed) {
+    raiseSuppressed = false
+    raiseStack()
+  }
+}
+
+function onReflexMouseDown (): void {
+  scheduleRaise()
+}
+
+// Alt/Win releases are the moment Alt-Tab and Win+N switches actually land.
+const REFLEX_KEYS = new Set([56, 3640, 3675, 3676]) // uiohook AltL, AltR, MetaL, MetaR
+function onReflexKeyUp (e: HookKeyEvent): void {
+  if (REFLEX_KEYS.has(Number(e.keycode))) scheduleRaise()
+}
+
+// Run the hook whenever ink windows are visible; hidden ink has no z-order to
+// defend, so the hook (and any pending raises) stop with it.
+function updateRaiseReflex (): void {
+  if (!state.hidden) {
+    void startMouseHook().then(() => {
+      if (!uiohookRunning && !raiseFallback) {
+        raiseFallback = setInterval(() => {
+          if (liveGestures.size === 0) raiseStack()
+        }, 1000)
       }
-      raiseUiAboveOverlays()
-    }, 300)
-  } else if (!want && raiseWatchdog) {
-    clearInterval(raiseWatchdog)
-    raiseWatchdog = null
+    })
+  } else {
+    for (const t of raiseTimers) clearTimeout(t)
+    raiseTimers = []
+    raiseSuppressed = false
+    if (raiseFallback) {
+      clearInterval(raiseFallback)
+      raiseFallback = null
+    }
+    stopMouseHook()
   }
 }
 
 // The shell re-asserts the taskbar shortly AFTER an activation change, so a
 // single synchronous raise can lose the race. Fire a short burst of re-raises
 // around the two unavoidable focus transitions (text session start/end) to keep
-// any taskbar pop to a frame or two instead of a 300ms watchdog gap.
+// any taskbar pop to a frame or two.
 function raiseBurst (): void {
-  for (const delay of [40, 120, 250]) {
-    setTimeout(() => {
-      if (eyedropDisplayId !== null || eyedropCapturing) return
-      for (const win of overlays.values()) {
-        if (!win.isDestroyed()) win.moveTop()
-      }
-      if (state.mode) {
-        for (const win of inputs.values()) {
-          if (!win.isDestroyed() && win.isVisible()) win.moveTop()
-        }
-      }
-      raiseUiAboveOverlays()
-    }, delay)
-  }
+  for (const delay of [40, 120, 250]) setTimeout(raiseStack, delay)
 }
 
 // The overlay currently holding keyboard focus for the text tool. Focus is held
@@ -623,9 +681,11 @@ function updateGlobalEditShortcuts (): void {
 // ignores mouse events.
 interface HookMouseEvent { button: number }
 interface HookWheelEvent { rotation: number; ctrlKey: boolean; shiftKey: boolean }
+interface HookKeyEvent { keycode: number }
 interface Uiohook {
   on (event: 'mousedown' | 'mouseup', cb: (e: HookMouseEvent) => void): void
   on (event: 'wheel', cb: (e: HookWheelEvent) => void): void
+  on (event: 'keyup', cb: (e: HookKeyEvent) => void): void
   start (): void
   stop (): void
 }
@@ -673,6 +733,10 @@ async function startMouseHook (): Promise<void> {
       uiohook.on('mousedown', onGlobalMouseDown)
       uiohook.on('mouseup', onGlobalMouseUp)
       uiohook.on('wheel', onGlobalWheel)
+      // The topmost reflex shares the hook: any click or Alt/Win release may be
+      // the activation change that promotes the taskbar over the ink.
+      uiohook.on('mousedown', onReflexMouseDown)
+      uiohook.on('keyup', onReflexKeyUp)
       hookListenerAttached = true
     }
     uiohook.start()
@@ -725,7 +789,8 @@ function stopHighlightTracking (): void {
     if (win && !win.isDestroyed()) send(win, 'highlight-pointer', null)
     highlightDisplayId = null
   }
-  stopMouseHook()
+  // The hook stays up for the topmost reflex; updateRaiseReflex stops it when
+  // the ink is hidden (the only time neither consumer needs it).
 }
 
 function setHighlight (on: boolean): void {
@@ -746,7 +811,7 @@ function setHighlight (on: boolean): void {
   } else {
     stopHighlightTracking()
   }
-  updateRaiseWatchdog()
+  updateRaiseReflex()
   broadcast('highlight', state.highlight)
 }
 
@@ -760,7 +825,7 @@ function setDrawMode (on: boolean): void {
   }
   broadcast('mode', state.mode)
   updateGlobalEditShortcuts()
-  updateRaiseWatchdog()
+  updateRaiseReflex()
   if (state.mode) {
     for (const win of overlays.values()) {
       if (win.isDestroyed()) continue
@@ -786,6 +851,13 @@ function setDrawMode (on: boolean): void {
     for (const win of inputs.values()) {
       if (!win.isDestroyed()) win.hide()
     }
+    // Hidden catchers never deliver their pointer-ups; drop any gestures still
+    // marked live so they can't hold the reflex's raises hostage.
+    liveGestures.clear()
+    if (raiseSuppressed) {
+      raiseSuppressed = false
+      raiseStack()
+    }
     mouseModeFallback = setTimeout(() => {
       enterMouseMode()
       mouseModeFallback = null
@@ -808,7 +880,10 @@ function setHidden (hidden: boolean): void {
   if (state.hidden && state.highlight) setHighlight(false)
   broadcast('hidden', state.hidden)
   updateGlobalEditShortcuts()
-  updateRaiseWatchdog()
+  updateRaiseReflex()
+  // Freshly re-shown windows land wherever the shell left them; the reflex only
+  // fires on input, so restack once now.
+  if (!state.hidden) raiseStack()
 }
 
 function toggleBg (c: Bg): void {
@@ -866,7 +941,7 @@ async function hideUiForFreeze (): Promise<() => void> {
 }
 
 // Hand a frozen overlay back to click-through (the input catchers own the
-// pointer again; the resumed watchdog re-stacks them above the ink) and repaint
+// pointer again; endEyedrop's raiseStack already re-stacked them) and repaint
 // the OS cursor when returning to mouse mode. The exit tail of an eyedropper.
 function restoreOverlayInput (win: BrowserWindow | undefined): void {
   if (win && !win.isDestroyed()) win.setIgnoreMouseEvents(true, { forward: false })
@@ -950,8 +1025,9 @@ function endEyedrop (): void {
   globalShortcut.unregister('Escape')
   escShortcutOn = false
   updateGlobalEditShortcuts()
-  // Bring the toolbar/picker back above the (now live) overlays.
-  raiseUiAboveOverlays()
+  // Restore the whole stack: catchers back above the (now live) overlays, the
+  // toolbar/picker back on top. The reflex only fires on input, so do it here.
+  raiseStack()
   restoreOverlayInput(win)
 }
 
@@ -1384,10 +1460,16 @@ function wireIpc (): void {
     const displayId = inputDisplayByWc.get(e.sender.id)
     if (displayId === undefined) return
     send(overlays.get(displayId) ?? null, 'draw-input', payload)
-    // Starting a stroke closes any open toolbar menu, same as the overlay's own
-    // draw-start did when it still received the pointer directly.
-    if (typeof payload === 'object' && payload !== null && (payload as { t?: unknown }).t === 'down') {
+    if (typeof payload !== 'object' || payload === null) return
+    const p = payload as { t?: unknown; id?: unknown }
+    if (p.t === 'down') {
+      // Track the live gesture so the topmost reflex holds its raises until the
+      // stroke ends, and close any open toolbar menu, same as the overlay's own
+      // draw-start did when it still received the pointer directly.
+      liveGestures.add(`${displayId}:${String(p.id)}`)
       send(toolbar, 'close-menus')
+    } else if (p.t === 'up') {
+      gestureEnded(`${displayId}:${String(p.id)}`)
     }
   })
   // Drawing on a canvas asks the toolbar to close any open menu (its own
@@ -1547,8 +1629,9 @@ if (!app.requestSingleInstanceLock()) {
     registerConfigurableShortcuts()
     wireIpc()
     initAutoUpdate()
-    // Ink must sit above the taskbar from the start (mouse mode included).
-    updateRaiseWatchdog()
+    // Ink must sit above the taskbar from the start (mouse mode included), so
+    // arm the input-driven reflex that re-asserts it after activation changes.
+    updateRaiseReflex()
     screen.on('display-metrics-changed', () => { fitOverlays(); updateTooltipSide() })
     screen.on('display-added', (_e, d) => {
       createOverlay(d, overlays.size)
@@ -1561,9 +1644,12 @@ if (!app.requestSingleInstanceLock()) {
   app.on('will-quit', () => {
     globalShortcut.unregisterAll()
     stopHighlightTracking()
-    if (raiseWatchdog) {
-      clearInterval(raiseWatchdog)
-      raiseWatchdog = null
+    stopMouseHook()
+    for (const t of raiseTimers) clearTimeout(t)
+    raiseTimers = []
+    if (raiseFallback) {
+      clearInterval(raiseFallback)
+      raiseFallback = null
     }
   })
 }
