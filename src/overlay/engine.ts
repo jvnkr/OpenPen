@@ -270,12 +270,16 @@ function renderOp (ctx: CanvasRenderingContext2D, op: Op, alpha = 1): void {
         break
       }
       ctx.stroke(centerlinePath(pts))
-      // Open arrowhead: two barbs from the tip, swept back along the heading.
-      // Cap the head to the stroke length so a short flick can't grow a head
-      // bigger than the line itself.
+      // Open arrowhead: two barbs from the tip. Cap the head to the stroke
+      // length so a short flick can't grow a head bigger than the line itself.
       const tip = pts[pts.length - 1]
-      const head = Math.min(arrowHeadLen(op.size), pathLength(pts))
-      const ang = tipAngle(pts, head)
+      const len = pathLength(pts)
+      const head = Math.min(arrowHeadLen(op.size), len)
+      // Aim the head along the line's heading AT the tip — a short local window,
+      // not the full barb chord. On a curved approach the chord points off the
+      // line and the head looks rotated; the local heading keeps the barbs
+      // symmetric about the line so it always enters the head dead-centre.
+      const ang = tipAngle(pts, Math.min(head, Math.max(op.size, 6)))
       const spread = Math.PI / 6
       ctx.beginPath()
       ctx.moveTo(tip.x, tip.y)
