@@ -51,7 +51,7 @@ export const DEFAULT_HOTKEYS: HotkeyMap = {
   toggleHide: 'Ctrl+Shift+H',
   toggleToolbar: 'Ctrl+Shift+T',
   ...Object.fromEntries(
-    TOOLS.map(t => [toolAction(t.id), `Ctrl+Shift+${t.accel}`])
+    TOOLS.map(t => [toolAction(t.id), t.accel === null ? UNBOUND_HOTKEY : `Ctrl+Shift+${t.accel}`])
   ) as Record<`tool:${Tool}`, string>
 }
 

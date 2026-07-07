@@ -11,13 +11,15 @@
 
 export type Tool =
   | 'pen' | 'highlighter' | 'eraser' | 'text'
-  | 'line' | 'arrow' | 'rect' | 'ellipse' | 'drag'
+  | 'line' | 'arrow' | 'curveArrow' | 'rect' | 'ellipse' | 'drag'
 
 export interface ToolDef {
   id: Tool
   name: string
-  /** Global accelerator digit: Ctrl+Shift+<accel>. */
-  accel: number
+  /** Global accelerator digit (Ctrl+Shift+<accel>), or null for no default
+   *  shortcut. The digits 1..9 are all taken, so any further tool ships unbound
+   *  and can be assigned a key in Settings. */
+  accel: number | null
 }
 
 // Array order is the toolbar's display order. The tools take the clean 1..9 run
@@ -31,6 +33,7 @@ export const TOOLS: ToolDef[] = [
   { id: 'text', name: 'Text', accel: 5 },
   { id: 'line', name: 'Line', accel: 6 },
   { id: 'arrow', name: 'Arrow', accel: 7 },
+  { id: 'curveArrow', name: 'Curved arrow', accel: null },
   { id: 'rect', name: 'Rectangle', accel: 8 },
   { id: 'ellipse', name: 'Ellipse', accel: 9 }
 ]

@@ -18,6 +18,7 @@ export type HotkeyAction =
   | 'tool:text'
   | 'tool:line'
   | 'tool:arrow'
+  | 'tool:curveArrow'
   | 'tool:rect'
   | 'tool:ellipse'
   | 'tool:drag'
@@ -49,6 +50,8 @@ export const DEFAULT_HOTKEYS: HotkeyMap = {
   'tool:text': 'Ctrl+Shift+5',
   'tool:line': 'Ctrl+Shift+6',
   'tool:arrow': 'Ctrl+Shift+7',
+  // No default digit (1..9 are taken); assignable in Settings.
+  'tool:curveArrow': UNBOUND_HOTKEY,
   'tool:rect': 'Ctrl+Shift+8',
   'tool:ellipse': 'Ctrl+Shift+9'
 }

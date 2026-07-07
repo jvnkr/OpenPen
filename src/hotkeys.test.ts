@@ -13,9 +13,10 @@ import {
 import { TOOLS } from './tools'
 
 describe('hotkeys', () => {
-  it('covers every tool with a default shortcut', () => {
+  it('maps each tool to its default shortcut, or unbound when it has no digit', () => {
     for (const tool of TOOLS) {
-      expect(DEFAULT_HOTKEYS[`tool:${tool.id}`]).toBe(`Ctrl+Shift+${tool.accel}`)
+      const expected = tool.accel === null ? UNBOUND_HOTKEY : `Ctrl+Shift+${tool.accel}`
+      expect(DEFAULT_HOTKEYS[`tool:${tool.id}`]).toBe(expected)
     }
   })
 

@@ -3,6 +3,7 @@ import {
   ArrowUpRight,
   Camera,
   Circle,
+  CornerUpRight,
   Eraser,
   Eye,
   Highlighter,
@@ -62,6 +63,7 @@ const TOOL_ICONS: Record<Tool, LucideIcon> = {
   text: Type,
   line: Minus,
   arrow: ArrowUpRight,
+  curveArrow: CornerUpRight,
   rect: Square,
   ellipse: Circle,
 };

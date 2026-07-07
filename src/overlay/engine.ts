@@ -53,9 +53,20 @@ interface ClearOp { kind: 'clear' }
 // delta and the object snaps back.
 interface MoveOp { kind: 'move'; id: number; dx: number; dy: number }
 
-export type DrawOp = StrokeOp | ShapeOp | TextOp
+// A freehand arrow: a pen-like path that ends in an open (two-line) arrowhead
+// pointing along the stroke's final direction. Uniform width, so the barbs
+// match the line — unlike the pen's velocity-tapered fill.
+interface ArrowStrokeOp {
+  kind: 'curveArrow'
+  id: number
+  color: string
+  size: number
+  points: Point[]
+}
+
+export type DrawOp = StrokeOp | ShapeOp | TextOp | ArrowStrokeOp
 export type Op = DrawOp | EraseOp | ClearOp | MoveOp
-type LiveOp = StrokeOp | ShapeOp
+type LiveOp = StrokeOp | ShapeOp | ArrowStrokeOp
 
 // Effective stamp width per tool (highlighter/eraser are wider than the slider value)
 const toolWidth = (tool: Tool, size: number): number =>
@@ -156,6 +167,49 @@ function drawArrow (ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: n
   ctx.fill()
 }
 
+// A smooth centreline through the points (midpoint-quadratic smoothing — the
+// classic signature curve). Stroked with a round cap/join it reads as a clean
+// hand-drawn line, without the freehand fill's velocity taper.
+function centerlinePath (pts: Point[]): Path2D {
+  const p = new Path2D()
+  p.moveTo(pts[0].x, pts[0].y)
+  if (pts.length === 2) {
+    p.lineTo(pts[1].x, pts[1].y)
+    return p
+  }
+  for (let i = 1; i < pts.length - 1; i++) {
+    const mx = (pts[i].x + pts[i + 1].x) / 2
+    const my = (pts[i].y + pts[i + 1].y) / 2
+    p.quadraticCurveTo(pts[i].x, pts[i].y, mx, my)
+  }
+  const last = pts[pts.length - 1]
+  p.lineTo(last.x, last.y)
+  return p
+}
+
+// Total length of the polyline through pts.
+function pathLength (pts: Point[]): number {
+  let len = 0
+  for (let i = 1; i < pts.length; i++) len += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y)
+  return len
+}
+
+// Heading (radians) at the stroke's tip: from the last point at least `back` px
+// behind the tip, toward the tip. Walking back that far keeps the arrowhead
+// steady when the final segment is tiny (a slow release would otherwise jitter
+// the angle).
+function tipAngle (pts: Point[], back: number): number {
+  const tip = pts[pts.length - 1]
+  let bx = pts[0].x
+  let by = pts[0].y
+  for (let i = pts.length - 2; i >= 0; i--) {
+    bx = pts[i].x
+    by = pts[i].y
+    if (Math.hypot(tip.x - bx, tip.y - by) >= back) break
+  }
+  return Math.atan2(tip.y - by, tip.x - bx)
+}
+
 // `alpha` scales the op's opacity (1 = normal). Used for the eraser-hover dim
 // and the fading-ink effect, which both need to draw an op more faintly.
 function renderOp (ctx: CanvasRenderingContext2D, op: Op, alpha = 1): void {
@@ -203,6 +257,34 @@ function renderOp (ctx: CanvasRenderingContext2D, op: Op, alpha = 1): void {
       ctx.stroke()
       break
     }
+    case 'curveArrow': {
+      ctx.strokeStyle = op.color
+      ctx.fillStyle = op.color
+      ctx.lineWidth = op.size
+      const pts = op.points
+      if (pts.length < 2) {
+        // A single tap: just a dot, no head to point anywhere.
+        ctx.beginPath()
+        ctx.arc(pts[0].x, pts[0].y, op.size / 2, 0, TAU)
+        ctx.fill()
+        break
+      }
+      ctx.stroke(centerlinePath(pts))
+      // Open arrowhead: two barbs from the tip, swept back along the heading.
+      // Cap the head to the stroke length so a short flick can't grow a head
+      // bigger than the line itself.
+      const tip = pts[pts.length - 1]
+      const head = Math.min(arrowHeadLen(op.size), pathLength(pts))
+      const ang = tipAngle(pts, head)
+      const spread = Math.PI / 6
+      ctx.beginPath()
+      ctx.moveTo(tip.x, tip.y)
+      ctx.lineTo(tip.x - head * Math.cos(ang - spread), tip.y - head * Math.sin(ang - spread))
+      ctx.moveTo(tip.x, tip.y)
+      ctx.lineTo(tip.x - head * Math.cos(ang + spread), tip.y - head * Math.sin(ang + spread))
+      ctx.stroke()
+      break
+    }
     case 'text': {
       ctx.fillStyle = op.color
       ctx.font = `600 ${op.fontPx}px "Segoe UI", system-ui, sans-serif`
@@ -238,6 +320,15 @@ function opHit (op: DrawOp, px: number, py: number, tol: number, measure: Canvas
     case 'pen':
     case 'highlighter': {
       const t = tol + toolWidth(op.kind, op.size) / 2
+      const pts = op.points
+      if (pts.length === 1) return Math.hypot(px - pts[0].x, py - pts[0].y) <= t
+      for (let i = 0; i < pts.length - 1; i++) {
+        if (distToSegment(px, py, pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y) <= t) return true
+      }
+      return false
+    }
+    case 'curveArrow': {
+      const t = tol + op.size / 2
       const pts = op.points
       if (pts.length === 1) return Math.hypot(px - pts[0].x, py - pts[0].y) <= t
       for (let i = 0; i < pts.length - 1; i++) {
@@ -538,9 +629,12 @@ export class Engine {
       this.eraseAt(x, y)
       return
     }
-    const op: LiveOp = (tool === 'pen' || tool === 'highlighter')
-      ? { kind: tool, id: this.doc.newId(), color, size, points: [{ x, y, pressure }], realPressure: realPressure && tool === 'pen' }
-      : { kind: tool, id: this.doc.newId(), color, size, x0: x, y0: y, x1: x, y1: y, shift }
+    const op: LiveOp =
+      tool === 'pen' || tool === 'highlighter'
+        ? { kind: tool, id: this.doc.newId(), color, size, points: [{ x, y, pressure }], realPressure: realPressure && tool === 'pen' }
+        : tool === 'curveArrow'
+          ? { kind: 'curveArrow', id: this.doc.newId(), color, size, points: [{ x, y }] }
+          : { kind: tool, id: this.doc.newId(), color, size, x0: x, y0: y, x1: x, y1: y, shift }
     this.live.set(pointerId, op)
     this.repaint()
   }
