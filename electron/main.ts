@@ -129,15 +129,6 @@ const broadcast = (ch: string, data?: unknown): void => {
   send(toolbar, ch, data)
 }
 
-// Raising the overlays (draw-mode entry, text-edit focus) puts them at the
-// top of the topmost z-band, which would bury OpenPen's own UI. Re-raise every
-// UI window above the overlays so hovering the toolbar or settings hits that
-// window and stays interactive instead of drawing on the canvas behind it.
-function raiseUiAboveOverlays (): void {
-  if (settingsWin && !settingsWin.isDestroyed()) settingsWin.moveTop()
-  if (toolbar && !toolbar.isDestroyed()) toolbar.moveTop()
-}
-
 // Put an overlay above the Windows taskbar so ink covers the whole screen. The
 // taskbar sits in the same always-on-top z-band, and a lone moveTop() can land
 // under it; toggling always-on-top off→on re-inserts the window at the very top
@@ -178,27 +169,72 @@ let raiseStrong = false
 // old interval behaviour.
 let raiseFallback: NodeJS.Timeout | null = null
 
-// One repair pass, bottom-up: ink to the top of the band, each catcher directly
-// above its own ink window (moveAbove, not moveTop, so catchers never leapfrog
-// the UI), then OpenPen's UI back on top. Paused during an eyedrop, which
-// deliberately raises a frozen overlay above the UI windows so the whole screen
-// stays sample-able.
+// The invisible 1×1 "floor" anchor at the bottom of OpenPen's window stack.
+// Raising ink with moveTop() lifts it above the toolbar/settings for the
+// sub-millisecond until the UI is re-raised, and whenever DWM composes a frame
+// inside that gap the ink visibly flashes THROUGH the UI window. The floor
+// removes the crossing: only the floor (which has no pixels) ever moveTop()s;
+// every visible window is then inserted directly above the floor, top-down, so
+// each one only ever slides UP into a slot that is already below the UI.
+// (Verified with a staged Electron experiment: inserting above a 1×1
+// transparent anchor lands each window below everything placed earlier.)
+let zFloor: BrowserWindow | null = null
+function createZFloor (): void {
+  zFloor = new BrowserWindow({
+    x: 0, y: 0, width: 1, height: 1,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    show: false,
+    focusable: false,
+    parent: createHiddenOwner()
+  })
+  zFloor.setAlwaysOnTop(true, 'screen-saver')
+  zFloor.setIgnoreMouseEvents(true, { forward: false })
+  zFloor.setMenu(null)
+  zFloor.on('page-title-updated', ev => ev.preventDefault())
+  zFloor.setTitle('OpenPen Anchor')
+  zFloor.showInactive()
+}
+
+// One repair pass. The floor goes to the top of the band (invisible, so the
+// crossing can't glitch), then every window is inserted directly above it in
+// top-down order — toolbar, settings, catchers, ink — which yields
+// floor < ink < catchers < settings < toolbar without any visible window ever
+// passing above the UI. Paused during an eyedrop, which deliberately raises a
+// frozen overlay above the UI windows so the whole screen stays sample-able.
 function raiseStack (strong = false): void {
   if (eyedropDisplayId !== null || eyedropCapturing || state.hidden) return
-  for (const [id, win] of overlays) {
-    if (win.isDestroyed()) continue
-    if (strong) raiseOverlayTopmost(win)
-    else win.moveTop()
-    const input = inputs.get(id)
-    if (state.mode && input && !input.isDestroyed() && input.isVisible()) {
-      try {
-        input.moveAbove(win.getMediaSourceId())
-      } catch {
-        input.moveTop()
-      }
+  if (!zFloor || zFloor.isDestroyed()) return
+  if (strong) raiseOverlayTopmost(zFloor)
+  else zFloor.moveTop()
+  const floorId = zFloor.getMediaSourceId()
+  const above = (win: BrowserWindow | null): void => {
+    if (!win || win.isDestroyed()) return
+    try {
+      win.moveAbove(floorId)
+    } catch {
+      win.moveTop()
     }
   }
-  raiseUiAboveOverlays()
+  above(toolbar)
+  above(settingsWin)
+  if (state.mode) {
+    for (const win of inputs.values()) {
+      if (!win.isDestroyed() && win.isVisible()) above(win)
+    }
+  }
+  for (const win of overlays.values()) {
+    if (win.isDestroyed()) continue
+    // The strong toggle rebuilds a stripped WS_EX_TOPMOST bit but re-inserts at
+    // the top of the band; the immediate moveAbove pulls the ink back under the
+    // UI, so the exposure is one adjacent call on taskbar clicks only.
+    if (strong) raiseOverlayTopmost(win)
+    above(win)
+  }
 }
 
 // The taskbar promotion lands shortly AFTER the input event that caused it, so
@@ -296,10 +332,9 @@ function releaseTextFocus (): void {
   if (win.isFocused()) win.blur()
   // The blur is an activation change: the shell promotes the taskbar to topmost
   // in response, and blurring can also drop the transparent overlay's composited
-  // ink. Re-assert with the full off→on toggle and force a repaint.
-  raiseOverlayTopmost(win)
+  // ink. Re-assert the stack with the full off→on toggle and force a repaint.
+  raiseStack(true)
   win.webContents.invalidate()
-  raiseUiAboveOverlays()
   raiseBurst()
 }
 
@@ -414,12 +449,9 @@ function createOverlay (d: Display, index: number): void {
   win.setTitle(title)
   // Activating a window makes the Windows shell re-raise the taskbar above the
   // rest of the topmost band, so when the overlay does take focus (text editing —
-  // it's otherwise non-activating) immediately re-raise it, then OpenPen's UI
-  // above it (all topmost windows share one z-band, so focusing buried the UI).
-  win.on('focus', () => {
-    win.moveTop()
-    raiseUiAboveOverlays()
-  })
+  // it's otherwise non-activating) immediately re-place the whole stack (all
+  // topmost windows share one z-band, so focusing buried the UI).
+  win.on('focus', () => raiseStack())
   load(win, 'overlay')
   win.once('ready-to-show', () => {
     if (!state.hidden) win.showInactive()
@@ -464,8 +496,7 @@ function createInput (d: Display): void {
     // A display hot-plugged while drawing should join the active draw session.
     if (state.mode && !state.hidden) {
       win.showInactive()
-      raiseOverlayTopmost(win)
-      raiseUiAboveOverlays()
+      raiseStack(true)
     }
   })
   inputs.set(d.id, win)
@@ -553,6 +584,11 @@ function fitToolbarHeight (height: unknown): void {
   toolbar.setResizable(true)
   toolbar.setBounds({ x: b.x, y: b.y, width: TOOLBAR_W, height: h })
   toolbar.setResizable(false)
+  // Toggling resizable on Windows silently strips the native always-on-top bit
+  // (measured on the overlays; same trap here). Without this re-assert a later
+  // moveTop can't lift the toolbar above topmost ink and it stays buried.
+  toolbar.setAlwaysOnTop(false)
+  toolbar.setAlwaysOnTop(true, 'screen-saver', 1)
 }
 
 function toggleToolbar (): void {
@@ -829,9 +865,9 @@ function setHighlight (on: boolean): void {
   if (on) {
     if (state.hidden) setHidden(false)
     // Keep the (click-through) overlays above everything — taskbar included — so
-    // the halo paints over the whole screen, then put OpenPen's UI back on top.
-    for (const win of overlays.values()) raiseOverlayTopmost(win)
-    raiseUiAboveOverlays()
+    // the halo paints over the whole screen; the strong pass re-asserts topmost
+    // bits without the ink crossing OpenPen's own UI.
+    raiseStack(true)
     startHighlightTracking()
   } else {
     stopHighlightTracking()
@@ -852,23 +888,18 @@ function setDrawMode (on: boolean): void {
   updateGlobalEditShortcuts()
   updateRaiseReflex()
   if (state.mode) {
-    for (const win of overlays.values()) {
-      if (win.isDestroyed()) continue
-      // Re-assert topmost on entry so ink covers the taskbar too (it shares the
-      // topmost band and wins ties by being raised last).
-      raiseOverlayTopmost(win)
-    }
     // The ink overlays stay click-through even while drawing; the input catchers
     // shown just above them take the pointer instead. Nothing gets focused, so
     // the app underneath keeps keyboard input (and keeps playing) as you draw.
-    // Full topmost re-assert, not a bare moveTop: the taskbar may have been
-    // promoted to topmost since, and a catcher missing its bit loses forever.
+    // Show the catchers first (they're at 1/255 alpha, so wherever showInactive
+    // drops them is invisible), then one strong stack pass places everything:
+    // the toggle re-asserts topmost bits (the taskbar may have been promoted
+    // since, and a window missing its bit loses forever) without the ink ever
+    // crossing the toolbar or settings window.
     for (const win of inputs.values()) {
-      if (win.isDestroyed()) continue
-      win.showInactive()
-      raiseOverlayTopmost(win)
+      if (!win.isDestroyed()) win.showInactive()
     }
-    raiseUiAboveOverlays()
+    raiseStack(true)
   } else {
     // Leaving draw mode ends any text session: hand the keyboard back to the
     // app underneath (this commits an open edit via the textarea's blur).
@@ -1536,19 +1567,16 @@ function wireIpc (): void {
       textFocusWin = win
     } else {
       // Keep the keyboard (no blur — that's the other half of the taskbar
-      // flash); just hand the pointer back to the catchers.
+      // flash); just hand the pointer back to the catchers, then one strong
+      // stack pass re-slots everything without ink crossing the UI.
       win.setIgnoreMouseEvents(true, { forward: false })
-      raiseOverlayTopmost(win)
       if (state.mode && !state.hidden) {
         for (const iw of inputs.values()) {
-          if (!iw.isDestroyed()) {
-            iw.showInactive()
-            raiseOverlayTopmost(iw)
-          }
+          if (!iw.isDestroyed()) iw.showInactive()
         }
       }
+      raiseStack(true)
       win.webContents.invalidate()
-      raiseUiAboveOverlays()
     }
   })
   ipcMain.on('cmd', (_e, name: string) => runCmd(name))
@@ -1649,6 +1677,7 @@ if (!app.requestSingleInstanceLock()) {
   void app.whenReady().then(() => {
     app.setAppUserModelId(APP_ID)
     loadSettings()
+    createZFloor()
     createOverlays()
     createToolbar()
     applyUiCaptureProtection()
@@ -1663,6 +1692,9 @@ if (!app.requestSingleInstanceLock()) {
     screen.on('display-added', (_e, d) => {
       createOverlay(d, overlays.size)
       createInput(d)
+      // Fresh windows raise themselves to the top of the band at creation; one
+      // stack pass slots them back under the UI.
+      raiseStack()
     })
     screen.on('display-removed', (_e, d) => destroyOverlay(d.id))
   })
