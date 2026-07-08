@@ -33,5 +33,10 @@ contextBridge.exposeInMainWorld('openpen', {
     const listener = (_e: IpcRendererEvent, data: unknown): void => fn(data)
     ipcRenderer.on(channel, listener)
     return () => ipcRenderer.removeListener(channel, listener)
+  },
+  // Synchronous save on its own channel: blocks until main has written to disk,
+  // so a final flush at quit can't be lost to the process exiting first.
+  flush (data: unknown): void {
+    ipcRenderer.sendSync('save-board-sync', data)
   }
 })

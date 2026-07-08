@@ -1715,6 +1715,23 @@ function saveBoardFromOverlay (wcId: number, payload: unknown): void {
   })
 }
 
+// Immediate, synchronous save from an overlay (used at quit/teardown). The async
+// 'save-board' path can arrive after the quit-time flush and be dropped; writing
+// straight through here — bypassing the debounce — guarantees the final state
+// (e.g. a clear) reaches disk before the app exits.
+function saveBoardImmediate (wcId: number, payload: unknown): void {
+  if (!settings.restoreInk) return
+  const binding = boardByWc.get(wcId)
+  if (!binding) return
+  const doc = coerceDoc(payload)
+  if (!doc) return
+  pendingBoards.set(binding.id, {
+    version: 1, id: binding.id, displayKey: binding.displayKey,
+    name: 'Display board', updatedAt: Date.now(), doc
+  })
+  flushBoard(binding.id)
+}
+
 function scheduleBoardSave (board: StoredBoard): void {
   pendingBoards.set(board.id, board)
   const t = boardSaveTimers.get(board.id)
@@ -1751,6 +1768,12 @@ function wireIpc (): void {
     if (displayId !== undefined) loadBoardForOverlay(e.sender, displayId)
   })
   ipcMain.on('save-board', (e, payload: unknown) => saveBoardFromOverlay(e.sender.id, payload))
+  // Synchronous final save (window teardown / quit). Write, then unblock the
+  // renderer — so the disk write completes before the page finishes unloading.
+  ipcMain.on('save-board-sync', (e, payload: unknown) => {
+    saveBoardImmediate(e.sender.id, payload)
+    e.returnValue = null
+  })
   ipcMain.on('export-result', (_e, payload: unknown) => { void finishExport(payload) })
   ipcMain.on('overlay-cursor-ready', () => {
     if (state.mode) {

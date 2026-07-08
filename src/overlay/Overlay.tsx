@@ -68,23 +68,30 @@ export default function Overlay (): React.JSX.Element {
 
   useEffect(() => {
     // Autosave: debounce serialize+send so a burst of strokes turns into one
-    // message (main debounces the disk write again). flushSave runs it now, used
-    // on pagehide so the last change survives the window closing / app quitting.
+    // async message (main debounces the disk write again).
     let saveTimer = 0
-    const flushSave = (): void => {
-      if (saveTimer) { window.clearTimeout(saveTimer); saveTimer = 0 }
+    const sendSave = (): void => {
       const e = engRef.current
       if (e) window.openpen.send('save-board', e.serialize())
     }
     const scheduleSave = (): void => {
       if (saveTimer) window.clearTimeout(saveTimer)
-      saveTimer = window.setTimeout(() => { saveTimer = 0; flushSave() }, 600)
+      saveTimer = window.setTimeout(() => { saveTimer = 0; sendSave() }, 600)
+    }
+    // Final flush at teardown/quit. It must be SYNCHRONOUS: an async send here
+    // races the app exiting and loses — the message arrives after main's
+    // quit-time flush, so the last change (e.g. a clear) is dropped and reload
+    // shows stale ink. The sync flush blocks until main has written to disk.
+    const flushSaveSync = (): void => {
+      if (saveTimer) { window.clearTimeout(saveTimer); saveTimer = 0 }
+      const e = engRef.current
+      if (e) window.openpen.flush(e.serialize())
     }
     const eng = new Engine(canvasRef.current!,
       h => window.openpen.send('history', h),
       scheduleSave)
     engRef.current = eng
-    window.addEventListener('pagehide', flushSave)
+    window.addEventListener('pagehide', flushSaveSync)
 
     const fit = (): void => eng.resize(window.innerWidth, window.innerHeight, window.devicePixelRatio || 1)
     fit()
@@ -191,11 +198,11 @@ export default function Overlay (): React.JSX.Element {
 
     window.openpen.send('overlay-ready')
     return () => {
-      flushSave()
+      flushSaveSync()
       window.removeEventListener('resize', fit)
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('contextmenu', onCtx)
-      window.removeEventListener('pagehide', flushSave)
+      window.removeEventListener('pagehide', flushSaveSync)
       offs.forEach(off => off())
     }
   }, [])

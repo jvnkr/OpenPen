@@ -162,4 +162,7 @@ export type SendArgs<K extends keyof SendMap> = SendMap[K] extends void ? [] : [
 export interface OpenPenApi {
   send<K extends keyof SendMap>(channel: K, ...args: SendArgs<K>): void
   on<K extends keyof RecvMap>(channel: K, fn: (data: RecvMap[K]) => void): () => void
+  // Synchronous final save (teardown/quit): blocks until main has written the
+  // board, so the last change can't be lost to the app exiting.
+  flush (doc: SerializedDoc): void
 }
