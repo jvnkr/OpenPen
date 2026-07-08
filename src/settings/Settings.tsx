@@ -435,6 +435,14 @@ export default function Settings (): React.JSX.Element {
                     variant="outline"
                     size="sm"
                     disabled={state.screenshotDest === 'clipboard'}
+                    onClick={() => window.openpen.send('open-screenshot-dir')}
+                  >
+                    Open folder
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={state.screenshotDest === 'clipboard'}
                     onClick={() => window.openpen.send('pick-screenshot-dir')}
                   >
                     Change…

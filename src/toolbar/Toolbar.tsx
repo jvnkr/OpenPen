@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   ArrowUpRight,
   Camera,
+  CircleCheck,
   Circle,
   CornerUpRight,
   Eraser,
@@ -128,6 +129,50 @@ function Tip({
   );
 }
 
+function ScreenshotTip({
+  label,
+  keys,
+  success,
+  onSuccessDone,
+  children,
+}: {
+  label: string;
+  keys?: string[];
+  success: string | null;
+  onSuccessDone: () => void;
+  children: React.ReactElement;
+}) {
+  const side = React.useContext(TipSideContext);
+  const clearSuccess = useRef(onSuccessDone);
+  clearSuccess.current = onSuccessDone;
+
+  useEffect(() => {
+    if (!success) return;
+    const timer = window.setTimeout(() => clearSuccess.current(), 2500);
+    return () => window.clearTimeout(timer);
+  }, [success]);
+
+  if (success) {
+    return (
+      <Tooltip open>
+        <TooltipTrigger render={children} />
+        <TooltipContent side={side}>
+          <span className="inline-flex items-center gap-1.5">
+            <CircleCheck className="size-3.5 shrink-0" />
+            <span>{success}</span>
+          </span>
+        </TooltipContent>
+      </Tooltip>
+    );
+  }
+
+  return (
+    <Tip label={label} keys={keys}>
+      {children}
+    </Tip>
+  );
+}
+
 function SizeDot({ value, className }: { value: number; className?: string }) {
   const dot = Math.max(4, Math.min(14, value * 0.6));
   // Render at a fixed 14px box and scale with a transform so cycling the brush
@@ -164,6 +209,7 @@ export default function Toolbar(): React.JSX.Element {
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [hotkeys, setHotkeys] = useState<HotkeyMap>(DEFAULT_HOTKEYS);
   const [screenshotting, setScreenshotting] = useState(false);
+  const [screenshotSuccess, setScreenshotSuccess] = useState<string | null>(null);
   const [sizeOpen, setSizeOpen] = useState(false);
   const [fadeOpen, setFadeOpen] = useState(false);
   const [colorOpen, setColorOpen] = useState(false);
@@ -197,6 +243,7 @@ export default function Toolbar(): React.JSX.Element {
         setSize((s) => clamp(s + d, 1, 48)),
       ),
       window.openpen.on("screenshotting", setScreenshotting),
+      window.openpen.on("screenshot-saved", setScreenshotSuccess),
       window.openpen.on("tooltip-side", setTipSide),
       window.openpen.on("set-theme", setTheme),
       // Apply the resolved theme when the main process broadcasts it — the same
@@ -677,7 +724,12 @@ export default function Toolbar(): React.JSX.Element {
                 <Trash2 />
               </Button>
             </Tip>
-            <Tip label="Save screenshot" keys={hk("screenshot")}>
+            <ScreenshotTip
+              label="Save screenshot"
+              keys={hk("screenshot")}
+              success={screenshotSuccess}
+              onSuccessDone={() => setScreenshotSuccess(null)}
+            >
               <Button
                 variant="ghost"
                 className="h-7 w-full rounded-sm px-0 [&_svg]:size-3.5"
@@ -686,7 +738,7 @@ export default function Toolbar(): React.JSX.Element {
               >
                 <Camera />
               </Button>
-            </Tip>
+            </ScreenshotTip>
           </div>
 
           <Separator className="my-0.5 shrink-0" />

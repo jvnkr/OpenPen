@@ -634,7 +634,7 @@ function showToolbar (): void {
 }
 
 // A conventional framed dialog (unlike the frameless overlay windows): the OS
-// title bar gives native move/resize/close. Kept above the overlays so it isn't
+// title bar gives native move and close. Kept above the overlays so it isn't
 // buried, and centred on whichever display holds the toolbar.
 function openSettings (): void {
   if (settingsWin && !settingsWin.isDestroyed()) {
@@ -647,14 +647,13 @@ function openSettings (): void {
   settingsWin = new BrowserWindow({
     width: SETTINGS_W,
     height: SETTINGS_H,
-    minWidth: 520,
-    minHeight: 380,
     x: Math.round(wa.x + (wa.width - SETTINGS_W) / 2),
     y: Math.round(wa.y + (wa.height - SETTINGS_H) / 2),
     title: 'OpenPen Settings',
     icon: appIconPath(),
     backgroundColor: resolvedTheme === 'dark' ? '#0a0a0a' : '#ffffff',
     show: false,
+    resizable: false,
     minimizable: false,
     maximizable: false,
     fullscreenable: false,
@@ -1057,6 +1056,10 @@ async function shoot (): Promise<void> {
     const body = file
       ? (dest === 'both' ? `Screenshot copied and saved:\n${file}` : `Screenshot saved:\n${file}`)
       : 'Screenshot copied to clipboard'
+    const toast = file
+      ? (dest === 'both' ? 'Saved and copied' : 'Screenshot saved')
+      : 'Copied to clipboard'
+    send(toolbar, 'screenshot-saved', toast)
     const n = new Notification({ title: 'OpenPen', body })
     if (file) {
       const saved = file
@@ -1213,6 +1216,12 @@ function resetScreenshotDir (): void {
   settings.screenshotDir = undefined
   saveSettings()
   broadcastSettingsState()
+}
+
+function openScreenshotDir (): void {
+  const dir = getScreenshotDir()
+  fs.mkdirSync(dir, { recursive: true })
+  void shell.openPath(dir)
 }
 
 async function pickScreenshotDir (): Promise<void> {
@@ -1667,6 +1676,7 @@ function wireIpc (): void {
   ipcMain.on('reset-hotkeys', resetHotkeys)
   ipcMain.on('pick-screenshot-dir', () => { void pickScreenshotDir() })
   ipcMain.on('reset-screenshot-dir', resetScreenshotDir)
+  ipcMain.on('open-screenshot-dir', openScreenshotDir)
   ipcMain.on('set-screenshot-dest', (_e, dest: unknown) => {
     if (!SHOT_DESTS.includes(dest as ShotDest)) return
     settings.screenshotDest = dest as ShotDest

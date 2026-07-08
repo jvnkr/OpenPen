@@ -72,6 +72,7 @@ export interface SendMap {
   'hotkey-capture': boolean
   'pick-screenshot-dir': void
   'reset-screenshot-dir': void
+  'open-screenshot-dir': void
   'set-screenshot-dest': ScreenshotDest
   'text-editing': boolean
   'draw-start': void
@@ -116,6 +117,7 @@ export interface RecvMap {
   'theme': string
   'close-menus': void
   'screenshotting': boolean
+  'screenshot-saved': string
   'tooltip-side': 'left' | 'right'
   'set-theme': ThemePref
   'settings-state': SettingsState

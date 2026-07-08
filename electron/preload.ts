@@ -10,7 +10,8 @@ const SEND = new Set([
   'overlay-cursor-ready', 'text-editing',
   'open-settings', 'settings-ready', 'set-theme', 'set-protect-ui',
   'set-hotkey', 'reset-hotkeys', 'hotkey-capture',
-  'pick-screenshot-dir', 'reset-screenshot-dir',
+  'pick-screenshot-dir', 'reset-screenshot-dir', 'set-screenshot-dest',
+  'open-screenshot-dir',
   'check-for-updates', 'install-update',
   'eyedrop-start', 'eyedrop-pick', 'eyedrop-cancel'
 ])
@@ -18,7 +19,7 @@ const ON = new Set([
   'tool-state', 'mode', 'bg', 'cmd', 'history',
   'highlight', 'highlight-pointer', 'highlight-press', 'draw-input',
   'pick-tool', 'adjust-size', 'hidden',
-  'theme', 'close-menus', 'screenshotting',
+  'theme', 'close-menus', 'screenshotting', 'screenshot-saved',
   'tooltip-side', 'set-theme', 'settings-state', 'hotkeys', 'update-badge', 'eyedrop'
 ])
 
