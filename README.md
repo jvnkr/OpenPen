@@ -26,6 +26,8 @@ Windows installers are built from source in GitHub Actions when a version tag is
 - Whiteboard and blackboard modes
 - Hide or show ink without clearing it
 - Screenshot your annotations to a file, the clipboard, or both — set the destination in Settings → Capture (save folder default: `Pictures\OpenPen`)
+- Export the whole board — just your annotations, not the screen behind them — to PNG, SVG (vector), or PDF from the tray menu, so a drawing becomes a shareable artifact
+- Your ink is saved per display and restored the next time OpenPen starts; turn it off in Settings → Canvas to start each session clean
 - System tray with quick actions. Draggable toolbar
 - Auto-updates from GitHub Releases, with update status in Settings
 - Light and dark themes

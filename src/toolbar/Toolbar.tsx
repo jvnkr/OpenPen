@@ -5,6 +5,7 @@ import {
   CircleCheck,
   Circle,
   CornerUpRight,
+  Download,
   Eraser,
   Eye,
   Highlighter,
@@ -739,6 +740,16 @@ export default function Toolbar(): React.JSX.Element {
                 <Camera />
               </Button>
             </ScreenshotTip>
+            <Tip label="Export annotations">
+              <Button
+                variant="ghost"
+                className="h-7 w-full rounded-sm px-0 [&_svg]:size-3.5"
+                aria-label="Export annotations"
+                onClick={() => window.openpen.send("export")}
+              >
+                <Download />
+              </Button>
+            </Tip>
           </div>
 
           <Separator className="my-0.5 shrink-0" />

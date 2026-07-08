@@ -67,9 +67,24 @@ export default function Overlay (): React.JSX.Element {
   }, [])
 
   useEffect(() => {
+    // Autosave: debounce serialize+send so a burst of strokes turns into one
+    // message (main debounces the disk write again). flushSave runs it now, used
+    // on pagehide so the last change survives the window closing / app quitting.
+    let saveTimer = 0
+    const flushSave = (): void => {
+      if (saveTimer) { window.clearTimeout(saveTimer); saveTimer = 0 }
+      const e = engRef.current
+      if (e) window.openpen.send('save-board', e.serialize())
+    }
+    const scheduleSave = (): void => {
+      if (saveTimer) window.clearTimeout(saveTimer)
+      saveTimer = window.setTimeout(() => { saveTimer = 0; flushSave() }, 600)
+    }
     const eng = new Engine(canvasRef.current!,
-      h => window.openpen.send('history', h))
+      h => window.openpen.send('history', h),
+      scheduleSave)
     engRef.current = eng
+    window.addEventListener('pagehide', flushSave)
 
     const fit = (): void => eng.resize(window.innerWidth, window.innerHeight, window.devicePixelRatio || 1)
     fit()
@@ -89,6 +104,22 @@ export default function Overlay (): React.JSX.Element {
       }),
       window.openpen.on('highlight', setHighlight),
       window.openpen.on('bg', b => setBg(b)),
+      // Persisted ink for this display, sent once on startup (null if none).
+      window.openpen.on('load-board', d => { if (d) eng.load(d) }),
+      // Render this display's board for export (the annotations only, not the
+      // screen behind them) and reply with the bytes for main to write.
+      window.openpen.on('export-board', kind => {
+        if (!eng.exportable) { window.openpen.send('export-result', { ok: false, error: 'empty' }); return }
+        const b = latest.current.bg
+        const bgColor = b === 'white' ? '#ffffff' : b === 'black' ? '#15161a' : null
+        const { width, height } = eng.exportSize
+        try {
+          const data = kind === 'svg' ? eng.exportSVG(bgColor) : eng.exportPNG(bgColor)
+          window.openpen.send('export-result', { ok: true, kind, data, width, height })
+        } catch (err) {
+          window.openpen.send('export-result', { ok: false, error: err instanceof Error ? err.message : 'Export failed.' })
+        }
+      }),
       window.openpen.on('eyedrop', d => {
         commitEditRef.current(false)
         setEyedrop(d)
@@ -160,9 +191,11 @@ export default function Overlay (): React.JSX.Element {
 
     window.openpen.send('overlay-ready')
     return () => {
+      flushSave()
       window.removeEventListener('resize', fit)
       window.removeEventListener('keydown', onKey)
       window.removeEventListener('contextmenu', onCtx)
+      window.removeEventListener('pagehide', flushSave)
       offs.forEach(off => off())
     }
   }, [])

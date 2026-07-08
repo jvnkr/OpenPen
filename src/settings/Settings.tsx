@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Monitor, Moon, Palette, Info, Camera, Sun, Keyboard, RotateCcw, Save, Clipboard, ClipboardCopy, type LucideIcon } from 'lucide-react'
+import { Monitor, Moon, Palette, Info, Camera, Sun, Keyboard, RotateCcw, Save, Clipboard, ClipboardCopy, PenLine, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { applyDarkClass } from '@/lib/theme'
 import { Button } from '@/components/ui/button'
@@ -8,7 +8,7 @@ import { DEFAULT_HOTKEYS, HOTKEY_GROUPS, allHotkeysAtDefault, findHotkeyConflict
 import { HotkeyInput } from './HotkeyInput'
 import '@/styles/globals.css'
 
-type Section = 'appearance' | 'hotkeys' | 'capture' | 'about'
+type Section = 'appearance' | 'canvas' | 'hotkeys' | 'capture' | 'about'
 
 interface SavedState { theme?: ThemePref }
 
@@ -35,6 +35,7 @@ const SHOT_DESTS: Array<{ value: ScreenshotDest, label: string, Icon: LucideIcon
 
 const NAV: Array<{ value: Section, label: string, Icon: LucideIcon }> = [
   { value: 'appearance', label: 'Appearance', Icon: Palette },
+  { value: 'canvas', label: 'Canvas', Icon: PenLine },
   { value: 'hotkeys', label: 'Hotkeys', Icon: Keyboard },
   { value: 'capture', label: 'Capture', Icon: Camera },
   { value: 'about', label: 'About', Icon: Info }
@@ -47,6 +48,7 @@ const EMPTY_STATE: SettingsState = {
   screenshotDir: '',
   screenshotDirDefault: '',
   screenshotDest: 'file',
+  restoreInk: true,
   isDev: false,
   version: '',
   canUpdate: false,
@@ -163,6 +165,7 @@ export default function Settings (): React.JSX.Element {
   }
 
   const setProtectUi = (v: boolean): void => window.openpen.send('set-protect-ui', v)
+  const setRestoreInk = (v: boolean): void => window.openpen.send('set-restore-ink', v)
   const setScreenshotDest = (d: ScreenshotDest): void => window.openpen.send('set-screenshot-dest', d)
   const applyHotkey = (action: HotkeyAction, accelerator: string, force = false): void => {
     setPendingHotkey(null)
@@ -248,6 +251,23 @@ export default function Settings (): React.JSX.Element {
                     </button>
                   ))}
                 </div>
+              </Row>
+            </div>
+          </section>
+        )}
+
+        {section === 'canvas' && (
+          <section>
+            <h2 className="text-base font-semibold">Canvas</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Control what happens to your ink between sessions.
+            </p>
+            <div className="mt-4 divide-y">
+              <Row
+                title="Restore ink on launch"
+                description="Save your annotations for each display and bring them back the next time OpenPen starts. Turn off to begin every session with a clean screen and keep no ink on disk."
+              >
+                <Switch checked={state.restoreInk} onChange={setRestoreInk} />
               </Row>
             </div>
           </section>

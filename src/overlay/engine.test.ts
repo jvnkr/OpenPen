@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { InkDoc, tipAngle } from './engine'
-import type { Op, Point } from './engine'
+import { InkDoc, tipAngle, opToSvg } from './engine'
+import type { DrawOp, Op, Point } from './engine'
 
 // A minimal pen op — enough to stand in as a drawable object in the log.
 const pen = (id: number): Op => ({ kind: 'pen', id, color: '#000', size: 1, points: [] })
@@ -52,6 +52,95 @@ describe('InkDoc history', () => {
     expect(d.clearable).toBe(true)
     d.push({ kind: 'clear' })
     expect(d.clearable).toBe(false) // already cleared
+  })
+})
+
+describe('InkDoc serialize/load', () => {
+  it('round-trips the op log, id counter and derived queries', () => {
+    const d = new InkDoc()
+    d.push(pen(1))
+    d.push(pen(2))
+    d.push({ kind: 'erase', ids: [1] })
+    const e = new InkDoc()
+    e.load(d.serialize())
+    expect(e.all).toEqual(d.all)
+    expect(e.canUndo).toBe(true)
+    expect(e.hiddenIds()).toEqual(new Set([1]))
+  })
+
+  it('drops the redo stack on load (undone work is not restored)', () => {
+    const d = new InkDoc()
+    d.push(pen(1))
+    d.undo() // pen(1) is now on the redo stack, out of the active log
+    const e = new InkDoc()
+    e.load(d.serialize())
+    expect(e.canRedo).toBe(false)
+    expect(e.canUndo).toBe(false)
+    expect(e.all).toHaveLength(0)
+  })
+
+  it('resumes ids above the largest loaded id, even if idSeq is stale', () => {
+    const e = new InkDoc()
+    e.load({ version: 1, ops: [pen(5), pen(9)], idSeq: 3 })
+    expect(e.newId()).toBe(10)
+  })
+
+  it('is empty and counts from 1 after loading an empty snapshot', () => {
+    const e = new InkDoc()
+    e.load({ version: 1, ops: [], idSeq: 1 })
+    expect(e.canUndo).toBe(false)
+    expect(e.all).toHaveLength(0)
+    expect(e.newId()).toBe(1)
+  })
+})
+
+describe('opToSvg', () => {
+  const draw = (op: DrawOp): string => opToSvg(op)
+
+  it('renders a pen stroke as a filled path in its colour', () => {
+    const s = draw({ kind: 'pen', id: 1, color: '#ff3b30', size: 6, points: [{ x: 0, y: 0 }, { x: 10, y: 8 }, { x: 20, y: 0 }] })
+    expect(s).toContain('<path')
+    expect(s).toContain('fill="#ff3b30"')
+    expect(s).not.toContain('NaN')
+  })
+
+  it('renders a single-point stroke as a dot', () => {
+    const s = draw({ kind: 'pen', id: 1, color: '#000', size: 6, points: [{ x: 5, y: 5 }] })
+    expect(s).toContain('<circle')
+  })
+
+  it('gives the highlighter reduced fill opacity', () => {
+    const s = draw({ kind: 'highlighter', id: 1, color: '#ffff00', size: 6, points: [{ x: 0, y: 0 }, { x: 9, y: 9 }] })
+    expect(s).toContain('fill-opacity="0.35"')
+  })
+
+  it('draws an arrow as a shaft plus a two-barb head', () => {
+    const s = draw({ kind: 'arrow', id: 1, color: '#000', size: 4, x0: 0, y0: 0, x1: 50, y1: 0, shift: false })
+    expect(s).toContain('stroke="#000"')
+    // shaft move + two barb moves = at least three subpath starts
+    expect((s.match(/M/g) ?? []).length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('renders rect and ellipse as unfilled stroked shapes', () => {
+    const rect = draw({ kind: 'rect', id: 1, color: '#0af', size: 2, x0: 0, y0: 0, x1: 30, y1: 20, shift: false })
+    expect(rect).toContain('<rect')
+    expect(rect).toContain('fill="none"')
+    const ell = draw({ kind: 'ellipse', id: 2, color: '#0af', size: 2, x0: 0, y0: 0, x1: 30, y1: 20, shift: false })
+    expect(ell).toContain('<ellipse')
+  })
+
+  it('escapes text content and keeps the raw characters out', () => {
+    const s = draw({ kind: 'text', id: 1, color: '#000', fontPx: 20, x: 5, y: 5, text: 'a < b & "c"' })
+    expect(s).toContain('<text')
+    expect(s).toContain('&lt;')
+    expect(s).toContain('&amp;')
+    expect(s).toContain('&quot;')
+    expect(s).not.toContain('a < b')
+  })
+
+  it('renders each newline of a text op as its own tspan', () => {
+    const s = draw({ kind: 'text', id: 1, color: '#000', fontPx: 20, x: 5, y: 5, text: 'one\ntwo' })
+    expect((s.match(/<tspan/g) ?? []).length).toBe(2)
   })
 })
 

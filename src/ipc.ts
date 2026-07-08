@@ -11,10 +11,21 @@ import type { HotkeyAction, HotkeyMap } from './hotkeys'
 import type { Bg, HistoryState, ToolState } from './types'
 import type { Tool } from './tools'
 import type { EyeDropData } from './overlay/EyeDropper'
+import type { SerializedDoc } from './overlay/engine'
+
+export type { SerializedDoc }
 
 export type ThemePref = 'system' | 'light' | 'dark'
 // Where a screenshot goes: a PNG file in the save folder, the clipboard, or both.
 export type ScreenshotDest = 'file' | 'clipboard' | 'both'
+// Board export: the file format the user picked, and what the overlay actually
+// renders for it (PDF is built in main from the PNG raster, so the overlay only
+// ever produces 'png' or 'svg').
+export type ExportFormat = 'png' | 'svg' | 'pdf'
+export type ExportRenderKind = 'png' | 'svg'
+export type ExportResult =
+  | { ok: true; kind: ExportRenderKind; data: string; width: number; height: number }
+  | { ok: false; error: string }
 export type UpdateStatus = 'idle' | 'checking' | 'downloading' | 'ready' | 'uptodate' | 'error'
 export interface Point2 { x: number; y: number }
 
@@ -37,6 +48,9 @@ export interface SettingsState {
   screenshotDir: string
   screenshotDirDefault: string
   screenshotDest: ScreenshotDest
+  // When on, ink is saved per display and restored on the next launch (and no
+  // ink is kept on disk when off).
+  restoreInk: boolean
   isDev: boolean
   version: string
   canUpdate: boolean
@@ -74,6 +88,13 @@ export interface SendMap {
   'reset-screenshot-dir': void
   'open-screenshot-dir': void
   'set-screenshot-dest': ScreenshotDest
+  'set-restore-ink': boolean
+  // The overlay's current ink document, sent (debounced) whenever it changes so
+  // main can persist it for this display.
+  'save-board': SerializedDoc
+  // The rendered board (PNG data URL or SVG string) replied to an 'export-board'
+  // request, or an error.
+  'export-result': ExportResult
   'text-editing': boolean
   'draw-start': void
   'toolbar-drag-start': Point2
@@ -85,6 +106,9 @@ export interface SendMap {
   'toggle-toolbar': void
   'open-settings': void
   'screenshot': void
+  // Ask main to export this board (annotations only) — opens a save dialog and
+  // rounds back through 'export-board'/'export-result'.
+  'export': void
   'eyedrop-start': void
   'eyedrop-pick': string
   'eyedrop-cancel': void
@@ -109,6 +133,12 @@ export interface RecvMap {
   // Forwarded pointer traffic arriving at an ink overlay from its display's
   // input-catcher window (routed through main).
   'draw-input': DrawInput
+  // Persisted ink for this overlay's display at startup — null when there's
+  // nothing to restore (or restore is off).
+  'load-board': SerializedDoc | null
+  // Render this display's board for export; the overlay replies on
+  // 'export-result'. 'png' also serves a PDF export (main wraps the raster).
+  'export-board': ExportRenderKind
   'cmd': string
   'history': HistoryState
   'pick-tool': Tool | 'mouse'

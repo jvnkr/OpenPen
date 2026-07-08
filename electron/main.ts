@@ -5,7 +5,10 @@ import {
 } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { pathToFileURL } from 'node:url'
 import { autoUpdater } from 'electron-updater'
+import { JsonBoardStore, type BoardStore, type StoredBoard, type SerializedDoc } from './boardStore.js'
 import {
   DEFAULT_HOTKEYS, HOTKEY_ACTIONS, mergeHotkeys,
   findHotkeyConflict, isValidAccelerator, isHotkeyBound,
@@ -26,7 +29,7 @@ interface HistoryState { canUndo: boolean; canRedo: boolean }
 // Mirrors ScreenshotDest in src/ipc.ts (main compiles separately).
 type ShotDest = 'file' | 'clipboard' | 'both'
 const SHOT_DESTS: readonly ShotDest[] = ['file', 'clipboard', 'both']
-interface Settings { protectUi: boolean; hotkeys?: Partial<HotkeyMap>; screenshotDir?: string; screenshotDest: ShotDest }
+interface Settings { protectUi: boolean; hotkeys?: Partial<HotkeyMap>; screenshotDir?: string; screenshotDest: ShotDest; restoreInk: boolean }
 
 // One overlay per display, keyed by display id.
 const overlays = new Map<number, BrowserWindow>()
@@ -35,6 +38,9 @@ const overlays = new Map<number, BrowserWindow>()
 // traffic to the right ink overlay.
 const inputs = new Map<number, BrowserWindow>()
 const inputDisplayByWc = new Map<number, number>()
+// Map an ink overlay's webContents id to its display, so a save-board or
+// overlay-ready message can be routed to the right monitor's board.
+const overlayDisplayByWc = new Map<number, number>()
 // Display currently frozen for the screen eyedropper (one at a time).
 let eyedropDisplayId: number | null = null
 let eyedropCapturing = false
@@ -68,7 +74,7 @@ const state: AppState = { mode: false, highlight: false, bg: 'none', hidden: fal
 // Persisted main-process settings. protectUi excludes the toolbar from screen
 // capture (WDA_EXCLUDEFROMCAPTURE) so screen recordings and screenshots show ink
 // but not the UI.
-const settings: Settings = { protectUi: !IS_DEV, screenshotDest: 'file' }
+const settings: Settings = { protectUi: !IS_DEV, screenshotDest: 'file', restoreInk: true }
 let hotkeys: HotkeyMap = { ...DEFAULT_HOTKEYS }
 let hotkeyError: string | null = null
 const settingsFile = (): string => path.join(app.getPath('userData'), 'settings.json')
@@ -99,7 +105,8 @@ function loadSettings (): void {
     Object.assign(settings, {
       protectUi: raw.protectUi,
       screenshotDir: typeof raw.screenshotDir === 'string' ? raw.screenshotDir.trim() : undefined,
-      screenshotDest: SHOT_DESTS.includes(raw.screenshotDest as ShotDest) ? raw.screenshotDest : 'file'
+      screenshotDest: SHOT_DESTS.includes(raw.screenshotDest as ShotDest) ? raw.screenshotDest : 'file',
+      restoreInk: typeof raw.restoreInk === 'boolean' ? raw.restoreInk : true
     })
     hotkeys = mergeHotkeys(sanitizeHotkeys(raw.hotkeys))
   } catch { /* first run */ }
@@ -112,7 +119,8 @@ function saveSettings (): void {
       protectUi: settings.protectUi,
       hotkeys: hotkeys,
       screenshotDir: settings.screenshotDir,
-      screenshotDest: settings.screenshotDest
+      screenshotDest: settings.screenshotDest,
+      restoreInk: settings.restoreInk
     }))
   } catch (err) {
     console.error('failed to save settings', err)
@@ -468,6 +476,7 @@ function createOverlay (d: Display, index: number): void {
     if (!state.hidden) win.showInactive()
   })
   overlays.set(d.id, win)
+  overlayDisplayByWc.set(win.webContents.id, d.id)
 }
 
 // The nearly-invisible input catcher for one display, stacked just above the ink
@@ -526,7 +535,14 @@ function destroyOverlay (displayId: number): void {
   overlays.delete(displayId)
   if (win && !win.isDestroyed()) {
     if (textFocusWin === win) textFocusWin = null
-    overlayHistory.delete(win.webContents.id)
+    const wcId = win.webContents.id
+    overlayHistory.delete(wcId)
+    // Persist whatever this overlay had queued before it goes away, then drop
+    // its bindings.
+    const binding = boardByWc.get(wcId)
+    if (binding) flushBoard(binding.id)
+    boardByWc.delete(wcId)
+    overlayDisplayByWc.delete(wcId)
     destroyWithOwner(win)
   }
   const input = inputs.get(displayId)
@@ -1074,6 +1090,115 @@ async function shoot (): Promise<void> {
   }
 }
 
+// --- Board export ------------------------------------------------------------
+// Export just the annotations (the vector ink), not the screen behind them, as a
+// shareable PNG/SVG/PDF — distinct from the screenshot, which bakes ink onto a
+// capture of the display. The overlay under the cursor renders its board (a PNG
+// data URL or an SVG string) and replies on 'export-result'; a PDF wraps the PNG
+// via Chromium's own printToPDF, so there's no third-party PDF dependency.
+type ExportFormat = 'png' | 'svg' | 'pdf'
+let pendingExport: { format: ExportFormat; filePath: string } | null = null
+
+async function exportBoard (): Promise<void> {
+  const win = overlays.get(displayAtCursor().id)
+  if (!win || win.isDestroyed()) return
+  const parent = (settingsWin && !settingsWin.isDestroyed())
+    ? settingsWin
+    : (toolbar && !toolbar.isDestroyed()) ? toolbar : undefined
+  const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
+  const opts: Electron.SaveDialogOptions = {
+    title: 'Export annotations',
+    defaultPath: path.join(getScreenshotDir(), `openpen-board-${stamp}.png`),
+    filters: [
+      { name: 'PNG image', extensions: ['png'] },
+      { name: 'SVG vector', extensions: ['svg'] },
+      { name: 'PDF document', extensions: ['pdf'] }
+    ]
+  }
+  const result = parent ? await dialog.showSaveDialog(parent, opts) : await dialog.showSaveDialog(opts)
+  if (result.canceled || !result.filePath) return
+  const ext = path.extname(result.filePath).toLowerCase()
+  const format: ExportFormat = ext === '.svg' ? 'svg' : ext === '.pdf' ? 'pdf' : 'png'
+  pendingExport = { format, filePath: result.filePath }
+  // SVG needs the vector string; PNG and PDF both start from the raster.
+  send(win, 'export-board', format === 'svg' ? 'svg' : 'png')
+}
+
+interface ExportOk { ok: true; kind: 'png' | 'svg'; data: string; width: number; height: number }
+function isExportOk (p: unknown): p is ExportOk {
+  if (typeof p !== 'object' || p === null) return false
+  const r = p as { ok?: unknown; data?: unknown; width?: unknown; height?: unknown }
+  return r.ok === true && typeof r.data === 'string' && typeof r.width === 'number' && typeof r.height === 'number'
+}
+
+function dataUrlToBuffer (dataUrl: string): Buffer {
+  const comma = dataUrl.indexOf(',')
+  return Buffer.from(comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl, 'base64')
+}
+
+async function finishExport (payload: unknown): Promise<void> {
+  const job = pendingExport
+  pendingExport = null
+  if (!job) return
+  if (!isExportOk(payload)) {
+    const empty = typeof payload === 'object' && payload !== null &&
+      (payload as { error?: unknown }).error === 'empty'
+    notify('OpenPen', empty ? 'Nothing to export — the board is empty.' : 'Could not export the board.')
+    return
+  }
+  try {
+    if (job.format === 'svg') {
+      fs.writeFileSync(job.filePath, payload.data, 'utf8')
+    } else if (job.format === 'png') {
+      fs.writeFileSync(job.filePath, dataUrlToBuffer(payload.data))
+    } else {
+      await writePdfFromImage(payload.data, payload.width, payload.height, job.filePath)
+    }
+    const saved = job.filePath
+    // Reveal the exported file in its folder right away, and leave a clickable
+    // notification to re-open it later.
+    shell.showItemInFolder(saved)
+    notify('OpenPen', `Board exported:\n${saved}`, () => shell.showItemInFolder(saved))
+  } catch (err) {
+    console.error('board export failed', err)
+    notify('OpenPen', 'Could not export the board.')
+  }
+}
+
+// Wrap a PNG in a single-page PDF the exact size of the board, using Chromium's
+// own PDF engine (no PDF dependency). The image and an HTML wrapper go to temp
+// files — a multi-MB data URL can exceed loadURL's limits — and preferCSSPageSize
+// honours the @page size so the page matches the artwork with no margins.
+async function writePdfFromImage (dataUrl: string, width: number, height: number, filePath: string): Promise<void> {
+  const w = Math.max(1, Math.round(width))
+  const h = Math.max(1, Math.round(height))
+  const base = path.join(app.getPath('temp'), `openpen-export-${randomUUID()}`)
+  const pngPath = `${base}.png`
+  const htmlPath = `${base}.html`
+  const pdfWin = new BrowserWindow({ show: false, webPreferences: { sandbox: true } })
+  try {
+    fs.writeFileSync(pngPath, dataUrlToBuffer(dataUrl))
+    const imgUrl = pathToFileURL(pngPath).href
+    fs.writeFileSync(htmlPath,
+      '<!doctype html><html><head><meta charset="utf-8"><style>' +
+      `@page { size: ${w}px ${h}px; margin: 0 }` +
+      'html,body { margin: 0; padding: 0 }' +
+      `img { display: block; width: ${w}px; height: ${h}px }` +
+      `</style></head><body><img src="${imgUrl}"></body></html>`)
+    await pdfWin.loadFile(htmlPath)
+    const pdf = await pdfWin.webContents.printToPDF({
+      printBackground: true,
+      preferCSSPageSize: true,
+      margins: { top: 0, bottom: 0, left: 0, right: 0 }
+    })
+    fs.writeFileSync(filePath, pdf)
+  } finally {
+    if (!pdfWin.isDestroyed()) pdfWin.destroy()
+    fs.rmSync(pngPath, { force: true })
+    fs.rmSync(htmlPath, { force: true })
+  }
+}
+
 // Screen colour picker. The native EyeDropper Web API only samples this app's
 // own compositor surface in Electron, so we roll our own: freeze the display
 // under the cursor onto its overlay and let the renderer sample a pixel with a
@@ -1185,6 +1310,7 @@ function buildSettingsState (): {
   screenshotDir: string
   screenshotDirDefault: string
   screenshotDest: ShotDest
+  restoreInk: boolean
   isDev: boolean
   version: string
   canUpdate: boolean
@@ -1199,6 +1325,7 @@ function buildSettingsState (): {
     screenshotDir: getScreenshotDir(),
     screenshotDirDefault: defaultScreenshotDir(),
     screenshotDest: settings.screenshotDest,
+    restoreInk: settings.restoreInk,
     isDev: IS_DEV,
     version: app.getVersion(),
     canUpdate: app.isPackaged,
@@ -1331,6 +1458,7 @@ function buildTrayMenu (): Menu {
     withAccel(hk.toggleHide, { label: 'Hide/show ink', click: () => setHidden(!state.hidden) }),
     withAccel(hk.toggleToolbar, { label: 'Show/hide toolbar', click: toggleToolbar }),
     withAccel(hk.screenshot, { label: 'Screenshot', click: () => { void shoot() } }),
+    { label: 'Export annotations…', click: () => { void exportBoard() } },
     { type: 'separator' },
     {
       label: IS_DEV ? 'Hide toolbar from capture (disabled in dev)' : 'Hide toolbar from capture',
@@ -1518,13 +1646,112 @@ function resetHotkeys (): void {
   broadcastSettingsState()
 }
 
+// --- Ink persistence ---------------------------------------------------------
+// One saved board per display (auto-resume). boardStore is the swappable storage
+// seam (JSON files today; a SQLite impl of the same interface later needs no
+// caller changes). Autosaves are debounced here, coalescing a burst of strokes
+// into one write, and flushed on display removal and quit.
+let boardStore: BoardStore
+interface BoardBinding { id: string; displayKey: string | null }
+const boardByWc = new Map<number, BoardBinding>()
+const pendingBoards = new Map<string, StoredBoard>()
+const boardSaveTimers = new Map<string, NodeJS.Timeout>()
+const BOARD_SAVE_DEBOUNCE = 500
+
+// A per-display key that stays stable across launches while the monitor layout
+// is unchanged (the common fixed-desk case). Position is included so two
+// identical monitors never collide onto one board — a same-session correctness
+// bug — at the cost of not restoring ink if the displays are later rearranged.
+function displaySignature (d: Display): string {
+  const b = d.bounds
+  return `${b.x},${b.y}_${b.width}x${b.height}@${d.scaleFactor}`
+}
+
+// This display's saved board, or a fresh empty one keyed to it.
+function boardForDisplay (displayId: number): StoredBoard {
+  const d = screen.getAllDisplays().find(x => x.id === displayId)
+  const key = d ? displaySignature(d) : `display-${displayId}`
+  const meta = boardStore.list().find(m => m.displayKey === key)
+  if (meta) {
+    const loaded = boardStore.load(meta.id)
+    if (loaded) return loaded
+  }
+  return {
+    version: 1, id: randomUUID(), displayKey: key,
+    name: 'Display board', updatedAt: Date.now(),
+    doc: { version: 1, ops: [], idSeq: 1 }
+  }
+}
+
+// On overlay boot: bind its webContents to the right board, and if restore is on
+// and there's ink, send it down to rehydrate. The binding is set even when empty
+// or disabled so later autosaves know their target.
+function loadBoardForOverlay (sender: Electron.WebContents, displayId: number): void {
+  const board = boardForDisplay(displayId)
+  boardByWc.set(sender.id, { id: board.id, displayKey: board.displayKey })
+  const restore = settings.restoreInk && board.doc.ops.length > 0
+  sender.send('load-board', restore ? board.doc : null)
+}
+
+function coerceDoc (payload: unknown): SerializedDoc | null {
+  if (typeof payload !== 'object' || payload === null) return null
+  const p = payload as { version?: unknown; ops?: unknown; idSeq?: unknown }
+  if (!Array.isArray(p.ops) || typeof p.idSeq !== 'number') return null
+  return { version: typeof p.version === 'number' ? p.version : 1, ops: p.ops, idSeq: p.idSeq }
+}
+
+// An overlay's ink changed. Ignored entirely when restore is off — that setting
+// means "keep no ink on disk". An empty document deletes the board file rather
+// than persisting something that renders to nothing.
+function saveBoardFromOverlay (wcId: number, payload: unknown): void {
+  if (!settings.restoreInk) return
+  const binding = boardByWc.get(wcId)
+  if (!binding) return
+  const doc = coerceDoc(payload)
+  if (!doc) return
+  scheduleBoardSave({
+    version: 1, id: binding.id, displayKey: binding.displayKey,
+    name: 'Display board', updatedAt: Date.now(), doc
+  })
+}
+
+function scheduleBoardSave (board: StoredBoard): void {
+  pendingBoards.set(board.id, board)
+  const t = boardSaveTimers.get(board.id)
+  if (t) clearTimeout(t)
+  boardSaveTimers.set(board.id, setTimeout(() => flushBoard(board.id), BOARD_SAVE_DEBOUNCE))
+}
+
+function flushBoard (id: string): void {
+  const t = boardSaveTimers.get(id)
+  if (t) clearTimeout(t)
+  boardSaveTimers.delete(id)
+  const board = pendingBoards.get(id)
+  if (!board) return
+  pendingBoards.delete(id)
+  try {
+    if (board.doc.ops.length === 0) boardStore.delete(id)
+    else boardStore.save(board)
+  } catch (err) {
+    console.error('failed to save board', err)
+  }
+}
+
+function flushAllBoards (): void {
+  for (const id of [...pendingBoards.keys()]) flushBoard(id)
+}
+
 function wireIpc (): void {
   ipcMain.on('overlay-ready', e => {
     if (state.toolState) e.sender.send('tool-state', state.toolState)
     e.sender.send('mode', state.mode)
     e.sender.send('highlight', state.highlight)
     e.sender.send('bg', state.bg)
+    const displayId = overlayDisplayByWc.get(e.sender.id)
+    if (displayId !== undefined) loadBoardForOverlay(e.sender, displayId)
   })
+  ipcMain.on('save-board', (e, payload: unknown) => saveBoardFromOverlay(e.sender.id, payload))
+  ipcMain.on('export-result', (_e, payload: unknown) => { void finishExport(payload) })
   ipcMain.on('overlay-cursor-ready', () => {
     if (state.mode) {
       for (const win of overlays.values()) repaintOverlayCursor(win)
@@ -1636,6 +1863,7 @@ function wireIpc (): void {
   ipcMain.on('adjust-size', (_e, d: number) => send(toolbar, 'adjust-size', d))
   ipcMain.on('set-bg', (_e, b: Bg) => toggleBg(b))
   ipcMain.on('screenshot', () => { void shoot() })
+  ipcMain.on('export', () => { void exportBoard() })
   ipcMain.on('theme', (_e, t: string) => {
     resolvedTheme = t === 'dark' ? 'dark' : 'light'
     // Broadcast to every window at once so their theme crossfades start in sync
@@ -1680,6 +1908,11 @@ function wireIpc (): void {
   ipcMain.on('set-screenshot-dest', (_e, dest: unknown) => {
     if (!SHOT_DESTS.includes(dest as ShotDest)) return
     settings.screenshotDest = dest as ShotDest
+    saveSettings()
+    broadcastSettingsState()
+  })
+  ipcMain.on('set-restore-ink', (_e, on: unknown) => {
+    settings.restoreInk = Boolean(on)
     saveSettings()
     broadcastSettingsState()
   })
@@ -1732,6 +1965,7 @@ if (!app.requestSingleInstanceLock()) {
   void app.whenReady().then(() => {
     app.setAppUserModelId(APP_ID)
     loadSettings()
+    boardStore = new JsonBoardStore(path.join(app.getPath('userData'), 'boards'))
     createZFloor()
     createOverlays()
     createToolbar()
@@ -1756,6 +1990,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('window-all-closed', () => app.quit())
   app.on('will-quit', () => {
+    flushAllBoards()
     globalShortcut.unregisterAll()
     stopHighlightTracking()
     stopMouseHook()

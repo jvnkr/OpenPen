@@ -68,6 +68,17 @@ export type DrawOp = StrokeOp | ShapeOp | TextOp | ArrowStrokeOp
 export type Op = DrawOp | EraseOp | ClearOp | MoveOp
 type LiveOp = StrokeOp | ShapeOp | ArrowStrokeOp
 
+// The serializable snapshot of an ink document: the op log plus the id counter,
+// under a schema version so the op shapes can evolve with a migration step
+// instead of a breaking change. This is the persistence contract carried across
+// the renderer↔main seam and stored by the board store — keep it JSON-only
+// (every Op already is).
+export interface SerializedDoc {
+  version: 1
+  ops: Op[]
+  idSeq: number
+}
+
 // Effective stamp width per tool (highlighter/eraser are wider than the slider value)
 const toolWidth = (tool: Tool, size: number): number =>
   tool === 'highlighter' ? size * 2 : tool === 'eraser' ? size * 2.5 : size
@@ -233,6 +244,121 @@ export function tipAngle (pts: Point[], back: number, trim = 0): number {
     return Math.atan2(tip.y - pts[0].y, tip.x - pts[0].x)
   }
   return Math.atan2(ay - by, ax - bx)
+}
+
+// --- SVG export --------------------------------------------------------------
+// A vector serialization of the ops that mirrors renderOp's geometry, so an
+// exported SVG matches the canvas. It lives in this module to reuse the same
+// private geometry (constrainLine/Rect, the freehand outline, the arrow heading)
+// — one source of truth for each op's shape.
+
+const svgNum = (n: number): string => String(Math.round(n * 100) / 100)
+
+function escapeXml (s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+// The freehand outline polygon as an SVG path `d`, with the same
+// midpoint-quadratic smoothing outlinePath uses on the canvas.
+function outlineToPathD (outline: number[][]): string {
+  if (outline.length === 0) return ''
+  const d = [`M${svgNum(outline[0][0])} ${svgNum(outline[0][1])}`]
+  for (let i = 1; i < outline.length; i++) {
+    const a = outline[i]
+    const b = outline[(i + 1) % outline.length]
+    d.push(`Q${svgNum(a[0])} ${svgNum(a[1])} ${svgNum((a[0] + b[0]) / 2)} ${svgNum((a[1] + b[1]) / 2)}`)
+  }
+  d.push('Z')
+  return d.join(' ')
+}
+
+// A pen/highlighter outline as a filled path, or a dot for a single tap — the
+// two cases fillFreehand draws.
+function freehandSvg (pts: Point[], width: number, color: string, opts: typeof PEN_FREEHAND, opacity: number): string {
+  const fo = opacity === 1 ? '' : ` fill-opacity="${opacity}"`
+  if (pts.length < 2) {
+    const p = pts[0]
+    return `<circle cx="${svgNum(p.x)}" cy="${svgNum(p.y)}" r="${svgNum(width / 2)}" fill="${color}"${fo}/>`
+  }
+  return `<path d="${outlineToPathD(getStroke(pts, { size: width, ...opts }))}" fill="${color}"${fo}/>`
+}
+
+// A stroked open path (shaft, curve, shape outline), round-capped like the
+// canvas (renderOp sets round join/cap globally).
+function strokeSvg (d: string, color: string, width: number): string {
+  return `<path d="${d}" fill="none" stroke="${color}" stroke-width="${svgNum(width)}" stroke-linecap="round" stroke-linejoin="round"/>`
+}
+
+// The open two-barb arrowhead as extra subpaths — the same barbs strokeArrowhead
+// draws (±ARROW_SPREAD around the heading into the tip).
+function arrowheadD (tipX: number, tipY: number, ang: number, head: number): string {
+  const ax = tipX - head * Math.cos(ang - ARROW_SPREAD)
+  const ay = tipY - head * Math.sin(ang - ARROW_SPREAD)
+  const bx = tipX - head * Math.cos(ang + ARROW_SPREAD)
+  const by = tipY - head * Math.sin(ang + ARROW_SPREAD)
+  return ` M${svgNum(tipX)} ${svgNum(tipY)} L${svgNum(ax)} ${svgNum(ay)} M${svgNum(tipX)} ${svgNum(tipY)} L${svgNum(bx)} ${svgNum(by)}`
+}
+
+// Centreline `d` for the freehand arrow — the same midpoint-quadratic curve as
+// centerlinePath.
+function centerlineD (pts: Point[]): string {
+  if (pts.length === 0) return ''
+  const d = [`M${svgNum(pts[0].x)} ${svgNum(pts[0].y)}`]
+  if (pts.length === 2) {
+    d.push(`L${svgNum(pts[1].x)} ${svgNum(pts[1].y)}`)
+    return d.join(' ')
+  }
+  for (let i = 1; i < pts.length - 1; i++) {
+    d.push(`Q${svgNum(pts[i].x)} ${svgNum(pts[i].y)} ${svgNum((pts[i].x + pts[i + 1].x) / 2)} ${svgNum((pts[i].y + pts[i + 1].y) / 2)}`)
+  }
+  const last = pts[pts.length - 1]
+  d.push(`L${svgNum(last.x)} ${svgNum(last.y)}`)
+  return d.join(' ')
+}
+
+// One drawable op as SVG markup, mirroring renderOp. Exported for unit tests.
+export function opToSvg (op: DrawOp): string {
+  switch (op.kind) {
+    case 'pen':
+      return freehandSvg(op.points, op.size, op.color, op.realPressure ? PEN_REAL : PEN_FREEHAND, 1)
+    case 'highlighter':
+      return freehandSvg(op.points, toolWidth('highlighter', op.size), op.color, HL_FREEHAND, 0.35)
+    case 'line': {
+      const [x1, y1] = constrainLine(op)
+      return strokeSvg(`M${svgNum(op.x0)} ${svgNum(op.y0)} L${svgNum(x1)} ${svgNum(y1)}`, op.color, op.size)
+    }
+    case 'arrow': {
+      const [x1, y1] = constrainLine(op)
+      const ang = Math.atan2(y1 - op.y0, x1 - op.x0)
+      const head = Math.min(arrowHeadLen(op.size), Math.hypot(x1 - op.x0, y1 - op.y0))
+      const d = `M${svgNum(op.x0)} ${svgNum(op.y0)} L${svgNum(x1)} ${svgNum(y1)}` + arrowheadD(x1, y1, ang, head)
+      return strokeSvg(d, op.color, op.size)
+    }
+    case 'rect': {
+      const r = constrainRect(op)
+      return `<rect x="${svgNum(r.x)}" y="${svgNum(r.y)}" width="${svgNum(r.w)}" height="${svgNum(r.h)}" fill="none" stroke="${op.color}" stroke-width="${svgNum(op.size)}" stroke-linejoin="round"/>`
+    }
+    case 'ellipse': {
+      const r = constrainRect(op)
+      return `<ellipse cx="${svgNum(r.x + r.w / 2)}" cy="${svgNum(r.y + r.h / 2)}" rx="${svgNum(r.w / 2)}" ry="${svgNum(r.h / 2)}" fill="none" stroke="${op.color}" stroke-width="${svgNum(op.size)}"/>`
+    }
+    case 'curveArrow': {
+      const pts = op.points
+      if (pts.length < 2) {
+        return `<circle cx="${svgNum(pts[0].x)}" cy="${svgNum(pts[0].y)}" r="${svgNum(op.size / 2)}" fill="${op.color}"/>`
+      }
+      const tip = pts[pts.length - 1]
+      const len = pathLength(pts)
+      const head = Math.min(arrowHeadLen(op.size), len)
+      const ang = tipAngle(pts, clamp(head / 2, Math.max(op.size, 8), head), Math.min(6, len / 4))
+      return strokeSvg(centerlineD(pts) + arrowheadD(tip.x, tip.y, ang, head), op.color, op.size)
+    }
+    case 'text': {
+      const tspans = op.text.split('\n').map((line, i) =>
+        `<tspan x="${svgNum(op.x)}" y="${svgNum(op.y + i * op.fontPx * 1.25)}">${escapeXml(line)}</tspan>`).join('')
+      return `<text fill="${op.color}" font-family="Segoe UI, system-ui, sans-serif" font-weight="600" font-size="${svgNum(op.fontPx)}px" dominant-baseline="text-before-edge" xml:space="preserve">${tspans}</text>`
+    }
+  }
 }
 
 // `alpha` scales the op's opacity (1 = normal). Used for the eraser-hover dim
@@ -440,6 +566,24 @@ export class InkDoc {
     return true
   }
 
+  // Snapshot the whole log for persistence. Redo history is intentionally left
+  // out — undone work isn't restored across restarts.
+  serialize (): SerializedDoc {
+    return { version: 1, ops: this.ops.slice(), idSeq: this.idSeq }
+  }
+
+  // Replace the log with a persisted snapshot and resume the id counter safely.
+  load (data: SerializedDoc): void {
+    this.ops = data.ops.slice()
+    this.redoStack = []
+    // A new id must never collide with a rehydrated one, or a later erase/move
+    // would target the wrong object. Resume above both the saved counter and the
+    // largest id actually present.
+    let max = data.idSeq - 1
+    for (const op of this.ops) if ('id' in op && op.id > max) max = op.id
+    this.idSeq = max + 1
+  }
+
   // Nothing before the most recent clear can be visible — skip it.
   activeStart (): number {
     for (let i = this.ops.length - 1; i >= 0; i--) {
@@ -495,8 +639,17 @@ export class Engine {
   private readonly baseC: HTMLCanvasElement
   private readonly base: CanvasRenderingContext2D
   private readonly onHistory: (h: HistoryState) => void
+  // Fired whenever the committed document changes (draw, erase, move, undo,
+  // redo, clear) so the overlay can autosave. Fading ink never commits, so it
+  // never triggers a save. Not fired on load — re-saving what we just read is
+  // pointless.
+  private readonly onChange?: () => void
   private readonly doc = new InkDoc()
   private dpr = 1
+  // CSS pixel size of the board, tracked from resize so an export (and its PDF
+  // page) can match the display without re-deriving it from device pixels.
+  private cssW = 0
+  private cssH = 0
   private erasing = false
   private erasePointer = -1
   private eraseSize = 0
@@ -534,16 +687,19 @@ export class Engine {
   private eraserHoverSize = 6
   private hoverEraseId = -1
 
-  constructor (canvas: HTMLCanvasElement, onHistory: (h: HistoryState) => void) {
+  constructor (canvas: HTMLCanvasElement, onHistory: (h: HistoryState) => void, onChange?: () => void) {
     this.screenC = canvas
     this.screen = canvas.getContext('2d')!
     this.baseC = document.createElement('canvas')
     this.base = this.baseC.getContext('2d')!
     this.onHistory = onHistory
+    this.onChange = onChange
   }
 
   resize (w: number, h: number, dpr: number): void {
     this.dpr = dpr
+    this.cssW = w
+    this.cssH = h
     for (const c of [this.screenC, this.baseC]) {
       c.width = Math.round(w * dpr)
       c.height = Math.round(h * dpr)
@@ -780,6 +936,102 @@ export class Engine {
     this.notify()
   }
 
+  // Rehydrate persisted ink at startup: load the snapshot, repaint, and refresh
+  // the toolbar's undo/redo state — without firing onChange (we'd just be
+  // re-saving what we loaded).
+  load (data: SerializedDoc): void {
+    this.doc.load(data)
+    this.replay()
+    this.onHistory({ canUndo: this.doc.canUndo, canRedo: this.doc.canRedo })
+  }
+
+  // The current document as a persistable snapshot.
+  serialize (): SerializedDoc {
+    return this.doc.serialize()
+  }
+
+  // --- Export ----------------------------------------------------------------
+  // Whether any visible committed ink exists to export (a drawable in the active
+  // range that hasn't been erased).
+  get exportable (): boolean {
+    const ops = this.doc.all
+    const start = this.doc.activeStart()
+    const hidden = this.doc.hiddenIds()
+    for (let i = start; i < ops.length; i++) {
+      const op = ops[i]
+      if (op.kind === 'erase' || op.kind === 'clear' || op.kind === 'move') continue
+      if (!hidden.has(op.id)) return true
+    }
+    return false
+  }
+
+  // The board's CSS pixel size, so the exporter (and the PDF page) can match it.
+  get exportSize (): { width: number; height: number } {
+    return { width: this.cssW, height: this.cssH }
+  }
+
+  // Paint the committed, visible document (no live gesture, no hover dim) onto an
+  // arbitrary context — the deterministic basis for a raster export.
+  private paintDoc (ctx: CanvasRenderingContext2D): void {
+    const ops = this.doc.all
+    const start = this.doc.activeStart()
+    const hidden = this.doc.hiddenIds()
+    const offs = this.doc.offsets()
+    for (let i = start; i < ops.length; i++) {
+      const op = ops[i]
+      if (op.kind === 'erase' || op.kind === 'clear' || op.kind === 'move') continue
+      if (hidden.has(op.id)) continue
+      const o = offs.get(op.id)
+      if (o) {
+        ctx.save()
+        ctx.translate(o.x, o.y)
+        renderOp(ctx, op)
+        ctx.restore()
+      } else {
+        renderOp(ctx, op)
+      }
+    }
+  }
+
+  // The board as a PNG data URL at device resolution. `bg` fills the canvas first
+  // (whiteboard/blackboard); null leaves it transparent.
+  exportPNG (bg: string | null): string {
+    const c = document.createElement('canvas')
+    c.width = Math.max(1, Math.round(this.cssW * this.dpr))
+    c.height = Math.max(1, Math.round(this.cssH * this.dpr))
+    const ctx = c.getContext('2d')!
+    if (bg) {
+      ctx.fillStyle = bg
+      ctx.fillRect(0, 0, c.width, c.height)
+    }
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
+    this.paintDoc(ctx)
+    return c.toDataURL('image/png')
+  }
+
+  // The board as an SVG document (vector). `bg` becomes a full-size backing rect;
+  // null leaves the page transparent. Moved objects are wrapped in a translate.
+  exportSVG (bg: string | null): string {
+    const { width, height } = this.exportSize
+    const ops = this.doc.all
+    const start = this.doc.activeStart()
+    const hidden = this.doc.hiddenIds()
+    const offs = this.doc.offsets()
+    const body: string[] = []
+    for (let i = start; i < ops.length; i++) {
+      const op = ops[i]
+      if (op.kind === 'erase' || op.kind === 'clear' || op.kind === 'move') continue
+      if (hidden.has(op.id)) continue
+      const markup = opToSvg(op)
+      const o = offs.get(op.id)
+      body.push(o ? `<g transform="translate(${svgNum(o.x)} ${svgNum(o.y)})">${markup}</g>` : markup)
+    }
+    const backing = bg ? `<rect width="${svgNum(width)}" height="${svgNum(height)}" fill="${bg}"/>` : ''
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' +
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${svgNum(width)}" height="${svgNum(height)}" viewBox="0 0 ${svgNum(width)} ${svgNum(height)}">` +
+      `${backing}${body.join('')}</svg>\n`
+  }
+
   private scheduleRepaint (): void {
     if (this.raf !== 0) return
     this.raf = requestAnimationFrame(() => {
@@ -866,6 +1118,7 @@ export class Engine {
 
   private notify (): void {
     this.onHistory({ canUndo: this.doc.canUndo, canRedo: this.doc.canRedo })
+    this.onChange?.()
   }
 
   private clearCtx (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
