@@ -142,29 +142,30 @@ function constrainRect (op: ShapeOp): { x: number; y: number; w: number; h: numb
 
 // Head length scales with the line so thick arrows stay proportioned.
 const arrowHeadLen = (size: number): number => Math.max(14, size * 4.5)
+const ARROW_SPREAD = Math.PI / 6
+
+// The open, two-barb arrowhead shared by the straight and freehand arrows: two
+// lines swept back from the tip at ±spread around `ang` (the heading INTO the
+// tip). Stroked with the caller's current lineWidth/strokeStyle, so it matches
+// the shaft; the round line cap fuses the two barbs cleanly at the tip.
+function strokeArrowhead (ctx: CanvasRenderingContext2D, tipX: number, tipY: number, ang: number, head: number): void {
+  ctx.beginPath()
+  ctx.moveTo(tipX, tipY)
+  ctx.lineTo(tipX - head * Math.cos(ang - ARROW_SPREAD), tipY - head * Math.sin(ang - ARROW_SPREAD))
+  ctx.moveTo(tipX, tipY)
+  ctx.lineTo(tipX - head * Math.cos(ang + ARROW_SPREAD), tipY - head * Math.sin(ang + ARROW_SPREAD))
+  ctx.stroke()
+}
 
 function drawArrow (ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, size: number): void {
   const ang = Math.atan2(y1 - y0, x1 - x0)
   const head = Math.min(arrowHeadLen(size), Math.hypot(x1 - x0, y1 - y0))
-  const spread = Math.PI / 6
-  // Two back corners of the head.
-  const lx = x1 - head * Math.cos(ang - spread)
-  const ly = y1 - head * Math.sin(ang - spread)
-  const rx = x1 - head * Math.cos(ang + spread)
-  const ry = y1 - head * Math.sin(ang + spread)
-  // Shaft stops at the head's midpoint so a thick line never pokes past the tip.
-  const bx = (lx + rx) / 2
-  const by = (ly + ry) / 2
+  // Shaft runs the full length to the tip; the open head strokes on top of it.
   ctx.beginPath()
   ctx.moveTo(x0, y0)
-  ctx.lineTo(bx, by)
+  ctx.lineTo(x1, y1)
   ctx.stroke()
-  ctx.beginPath()
-  ctx.moveTo(x1, y1)
-  ctx.lineTo(lx, ly)
-  ctx.lineTo(rx, ry)
-  ctx.closePath()
-  ctx.fill()
+  strokeArrowhead(ctx, x1, y1, ang, head)
 }
 
 // A smooth centreline through the points (midpoint-quadratic smoothing — the
@@ -294,8 +295,8 @@ function renderOp (ctx: CanvasRenderingContext2D, op: Op, alpha = 1): void {
         break
       }
       ctx.stroke(centerlinePath(pts))
-      // Open arrowhead: two barbs from the tip. Cap the head to the stroke
-      // length so a short flick can't grow a head bigger than the line itself.
+      // Same open head as the straight arrow. Cap it to the stroke length so a
+      // short flick can't grow a head bigger than the line itself.
       const tip = pts[pts.length - 1]
       const len = pathLength(pts)
       const head = Math.min(arrowHeadLen(op.size), len)
@@ -308,13 +309,7 @@ function renderOp (ctx: CanvasRenderingContext2D, op: Op, alpha = 1): void {
         clamp(head / 2, Math.max(op.size, 8), head),
         Math.min(6, len / 4),
       )
-      const spread = Math.PI / 6
-      ctx.beginPath()
-      ctx.moveTo(tip.x, tip.y)
-      ctx.lineTo(tip.x - head * Math.cos(ang - spread), tip.y - head * Math.sin(ang - spread))
-      ctx.moveTo(tip.x, tip.y)
-      ctx.lineTo(tip.x - head * Math.cos(ang + spread), tip.y - head * Math.sin(ang + spread))
-      ctx.stroke()
+      strokeArrowhead(ctx, tip.x, tip.y, ang, head)
       break
     }
     case 'text': {
