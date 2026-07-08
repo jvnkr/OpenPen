@@ -13,6 +13,8 @@ import type { Tool } from './tools'
 import type { EyeDropData } from './overlay/EyeDropper'
 
 export type ThemePref = 'system' | 'light' | 'dark'
+// Where a screenshot goes: a PNG file in the save folder, the clipboard, or both.
+export type ScreenshotDest = 'file' | 'clipboard' | 'both'
 export type UpdateStatus = 'idle' | 'checking' | 'downloading' | 'ready' | 'uptodate' | 'error'
 export interface Point2 { x: number; y: number }
 
@@ -34,6 +36,7 @@ export interface SettingsState {
   hotkeyError: string | null
   screenshotDir: string
   screenshotDirDefault: string
+  screenshotDest: ScreenshotDest
   isDev: boolean
   version: string
   canUpdate: boolean
@@ -69,6 +72,7 @@ export interface SendMap {
   'hotkey-capture': boolean
   'pick-screenshot-dir': void
   'reset-screenshot-dir': void
+  'set-screenshot-dest': ScreenshotDest
   'text-editing': boolean
   'draw-start': void
   'toolbar-drag-start': Point2

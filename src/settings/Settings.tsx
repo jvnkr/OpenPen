@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Monitor, Moon, Palette, Info, Camera, Sun, Keyboard, RotateCcw, type LucideIcon } from 'lucide-react'
+import { Monitor, Moon, Palette, Info, Camera, Sun, Keyboard, RotateCcw, Save, Clipboard, ClipboardCopy, type LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { applyDarkClass } from '@/lib/theme'
 import { Button } from '@/components/ui/button'
-import type { SettingsState, ThemePref } from '@/ipc'
+import type { ScreenshotDest, SettingsState, ThemePref } from '@/ipc'
 import { DEFAULT_HOTKEYS, HOTKEY_GROUPS, allHotkeysAtDefault, findHotkeyConflict, hotkeyLabel, UNBOUND_HOTKEY, type HotkeyAction } from '@/hotkeys'
 import { HotkeyInput } from './HotkeyInput'
 import '@/styles/globals.css'
@@ -27,6 +27,12 @@ const THEMES: Array<{ value: ThemePref, label: string, Icon: LucideIcon }> = [
   { value: 'dark', label: 'Dark', Icon: Moon }
 ]
 
+const SHOT_DESTS: Array<{ value: ScreenshotDest, label: string, Icon: LucideIcon }> = [
+  { value: 'file', label: 'Save file', Icon: Save },
+  { value: 'clipboard', label: 'Clipboard', Icon: Clipboard },
+  { value: 'both', label: 'Both', Icon: ClipboardCopy }
+]
+
 const NAV: Array<{ value: Section, label: string, Icon: LucideIcon }> = [
   { value: 'appearance', label: 'Appearance', Icon: Palette },
   { value: 'hotkeys', label: 'Hotkeys', Icon: Keyboard },
@@ -40,6 +46,7 @@ const EMPTY_STATE: SettingsState = {
   hotkeyError: null,
   screenshotDir: '',
   screenshotDirDefault: '',
+  screenshotDest: 'file',
   isDev: false,
   version: '',
   canUpdate: false,
@@ -156,6 +163,7 @@ export default function Settings (): React.JSX.Element {
   }
 
   const setProtectUi = (v: boolean): void => window.openpen.send('set-protect-ui', v)
+  const setScreenshotDest = (d: ScreenshotDest): void => window.openpen.send('set-screenshot-dest', d)
   const applyHotkey = (action: HotkeyAction, accelerator: string, force = false): void => {
     setPendingHotkey(null)
     window.openpen.send('set-hotkey', { action, accelerator, force })
@@ -388,10 +396,34 @@ export default function Settings (): React.JSX.Element {
                   onChange={setProtectUi}
                 />
               </Row>
-              <div className="py-3">
+              <Row
+                title="Screenshot destination"
+                description="Where the screenshot hotkey sends the capture: a PNG file, the clipboard, or both."
+              >
+                <div className="flex gap-1.5">
+                  {SHOT_DESTS.map(({ value, label, Icon }) => (
+                    <button
+                      key={value}
+                      onClick={() => setScreenshotDest(value)}
+                      className={cn(
+                        'flex flex-col items-center gap-1 rounded-md border px-3 py-2 text-xs transition-colors duration-150 ease-out',
+                        state.screenshotDest === value
+                          ? 'border-primary bg-accent text-accent-foreground'
+                          : 'border-border text-muted-foreground hover:bg-accent/50 hover:text-foreground'
+                      )}
+                    >
+                      <Icon className="size-4" />
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </Row>
+              <div className={cn('py-3', state.screenshotDest === 'clipboard' && 'opacity-50')}>
                 <div className="text-sm font-medium text-foreground">Screenshot save folder</div>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  Annotated screenshots are saved here.
+                  {state.screenshotDest === 'clipboard'
+                    ? 'Not used while screenshots go to the clipboard only.'
+                    : 'Annotated screenshots are saved here.'}
                 </p>
                 {state.screenshotDir && (
                   <p className="mt-2 break-all font-mono text-xs text-foreground">
@@ -402,6 +434,7 @@ export default function Settings (): React.JSX.Element {
                   <Button
                     variant="outline"
                     size="sm"
+                    disabled={state.screenshotDest === 'clipboard'}
                     onClick={() => window.openpen.send('pick-screenshot-dir')}
                   >
                     Change…
@@ -410,6 +443,7 @@ export default function Settings (): React.JSX.Element {
                     variant="outline"
                     size="sm"
                     disabled={
+                      state.screenshotDest === 'clipboard' ||
                       !state.screenshotDirDefault ||
                       state.screenshotDir === state.screenshotDirDefault
                     }

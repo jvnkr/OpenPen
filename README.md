@@ -23,7 +23,7 @@ Get the latest Windows installer from [Releases](https://github.com/jvnkr/OpenPe
 - Unlimited undo and redo, plus clear screen
 - Whiteboard and blackboard modes
 - Hide or show ink without clearing it
-- Save screenshots with your annotations to a folder you choose in Settings (default: `Pictures\OpenPen`)
+- Screenshot your annotations to a file, the clipboard, or both — set the destination in Settings → Capture (save folder default: `Pictures\OpenPen`)
 - System tray with quick actions. Draggable toolbar
 - Auto-updates from GitHub Releases, with update status in Settings
 - Light and dark themes

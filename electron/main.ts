@@ -1,6 +1,6 @@
 import {
   app, BrowserWindow, ipcMain, screen, globalShortcut,
-  desktopCapturer, Tray, Menu, nativeImage, Notification, shell, dialog,
+  desktopCapturer, Tray, Menu, nativeImage, Notification, shell, dialog, clipboard,
   type Display
 } from 'electron'
 import path from 'node:path'
@@ -22,7 +22,11 @@ type Bg = 'none' | 'white' | 'black'
 interface ToolState { tool: string; color: string; size: number }
 interface AppState { mode: boolean; highlight: boolean; bg: Bg; hidden: boolean; toolState: ToolState | null }
 interface HistoryState { canUndo: boolean; canRedo: boolean }
-interface Settings { protectUi: boolean; hotkeys?: Partial<HotkeyMap>; screenshotDir?: string }
+// Where Ctrl+Shift+S sends the capture: a PNG file, the clipboard, or both.
+// Mirrors ScreenshotDest in src/ipc.ts (main compiles separately).
+type ShotDest = 'file' | 'clipboard' | 'both'
+const SHOT_DESTS: readonly ShotDest[] = ['file', 'clipboard', 'both']
+interface Settings { protectUi: boolean; hotkeys?: Partial<HotkeyMap>; screenshotDir?: string; screenshotDest: ShotDest }
 
 // One overlay per display, keyed by display id.
 const overlays = new Map<number, BrowserWindow>()
@@ -64,7 +68,7 @@ const state: AppState = { mode: false, highlight: false, bg: 'none', hidden: fal
 // Persisted main-process settings. protectUi excludes the toolbar from screen
 // capture (WDA_EXCLUDEFROMCAPTURE) so screen recordings and screenshots show ink
 // but not the UI.
-const settings: Settings = { protectUi: !IS_DEV }
+const settings: Settings = { protectUi: !IS_DEV, screenshotDest: 'file' }
 let hotkeys: HotkeyMap = { ...DEFAULT_HOTKEYS }
 let hotkeyError: string | null = null
 const settingsFile = (): string => path.join(app.getPath('userData'), 'settings.json')
@@ -94,7 +98,8 @@ function loadSettings (): void {
     const raw = JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) as Partial<Settings>
     Object.assign(settings, {
       protectUi: raw.protectUi,
-      screenshotDir: typeof raw.screenshotDir === 'string' ? raw.screenshotDir.trim() : undefined
+      screenshotDir: typeof raw.screenshotDir === 'string' ? raw.screenshotDir.trim() : undefined,
+      screenshotDest: SHOT_DESTS.includes(raw.screenshotDest as ShotDest) ? raw.screenshotDest : 'file'
     })
     hotkeys = mergeHotkeys(sanitizeHotkeys(raw.hotkeys))
   } catch { /* first run */ }
@@ -106,7 +111,8 @@ function saveSettings (): void {
     fs.writeFileSync(settingsFile(), JSON.stringify({
       protectUi: settings.protectUi,
       hotkeys: hotkeys,
-      screenshotDir: settings.screenshotDir
+      screenshotDir: settings.screenshotDir,
+      screenshotDest: settings.screenshotDest
     }))
   } catch (err) {
     console.error('failed to save settings', err)
@@ -213,7 +219,12 @@ function raiseStack (strong = false): void {
   else zFloor.moveTop()
   const floorId = zFloor.getMediaSourceId()
   const above = (win: BrowserWindow | null): void => {
-    if (!win || win.isDestroyed()) return
+    // Skip hidden windows: a raise op (moveAbove/moveTop) RE-SHOWS a hidden
+    // window on Windows (measured), so raising a hidden toolbar/settings would
+    // resurrect it — the click reflex otherwise brings a Ctrl+Shift+T-hidden
+    // toolbar back on screen, stuck click-through. Hidden windows have no
+    // z-order slot to defend anyway.
+    if (!win || win.isDestroyed() || !win.isVisible()) return
     try {
       win.moveAbove(floorId)
     } catch {
@@ -224,7 +235,7 @@ function raiseStack (strong = false): void {
   above(settingsWin)
   if (state.mode) {
     for (const win of inputs.values()) {
-      if (!win.isDestroyed() && win.isVisible()) above(win)
+      if (!win.isDestroyed()) above(win)
     }
   }
   for (const win of overlays.values()) {
@@ -591,12 +602,22 @@ function fitToolbarHeight (height: unknown): void {
   toolbar.setAlwaysOnTop(true, 'screen-saver', 1)
 }
 
+// Re-arm the toolbar's click-through baseline. Showing a window doesn't
+// re-establish the mouse-event forwarding that lets the renderer detect when the
+// pointer is over the palette, so after any show the toolbar could stay
+// non-interactive; re-applying it freshly registers forwarding, and the
+// renderer flips to interactive on the next hover.
+function armToolbarInput (): void {
+  toolbar?.setIgnoreMouseEvents(true, { forward: true })
+}
+
 function toggleToolbar (): void {
   if (!toolbar || toolbar.isDestroyed()) return
   if (toolbar.isVisible()) {
     toolbar.hide()
   } else {
     toolbar.showInactive()
+    armToolbarInput()
   }
 }
 
@@ -605,7 +626,10 @@ function toggleToolbar (): void {
 // should just reveal the UI again, never toggle drawing.
 function showToolbar (): void {
   if (!toolbar || toolbar.isDestroyed()) return
-  if (!toolbar.isVisible()) toolbar.showInactive()
+  if (!toolbar.isVisible()) {
+    toolbar.showInactive()
+    armToolbarInput()
+  }
   toolbar.moveTop()
 }
 
@@ -1018,13 +1042,26 @@ async function shoot (): Promise<void> {
     await new Promise(r => setTimeout(r, 120)) // let UI cleanup and capture protection settle
     const img = await captureDisplay(d)
     if (!img) return
-    const dir = getScreenshotDir()
-    fs.mkdirSync(dir, { recursive: true })
-    const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
-    const file = path.join(dir, `openpen-${stamp}.png`)
-    fs.writeFileSync(file, img.toPNG())
-    const n = new Notification({ title: 'OpenPen', body: `Screenshot saved:\n${file}` })
-    n.on('click', () => shell.showItemInFolder(file))
+    const dest = settings.screenshotDest
+    // Clipboard gets the native image directly; the file path is the anchor for
+    // the "reveal in folder" notification when we also wrote one.
+    if (dest === 'clipboard' || dest === 'both') clipboard.writeImage(img)
+    let file: string | null = null
+    if (dest === 'file' || dest === 'both') {
+      const dir = getScreenshotDir()
+      fs.mkdirSync(dir, { recursive: true })
+      const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19)
+      file = path.join(dir, `openpen-${stamp}.png`)
+      fs.writeFileSync(file, img.toPNG())
+    }
+    const body = file
+      ? (dest === 'both' ? `Screenshot copied and saved:\n${file}` : `Screenshot saved:\n${file}`)
+      : 'Screenshot copied to clipboard'
+    const n = new Notification({ title: 'OpenPen', body })
+    if (file) {
+      const saved = file
+      n.on('click', () => shell.showItemInFolder(saved))
+    }
     n.show()
   } catch (err) {
     console.error('screenshot failed', err)
@@ -1144,6 +1181,7 @@ function buildSettingsState (): {
   hotkeyError: string | null
   screenshotDir: string
   screenshotDirDefault: string
+  screenshotDest: ShotDest
   isDev: boolean
   version: string
   canUpdate: boolean
@@ -1157,6 +1195,7 @@ function buildSettingsState (): {
     hotkeyError,
     screenshotDir: getScreenshotDir(),
     screenshotDirDefault: defaultScreenshotDir(),
+    screenshotDest: settings.screenshotDest,
     isDev: IS_DEV,
     version: app.getVersion(),
     canUpdate: app.isPackaged,
@@ -1628,6 +1667,12 @@ function wireIpc (): void {
   ipcMain.on('reset-hotkeys', resetHotkeys)
   ipcMain.on('pick-screenshot-dir', () => { void pickScreenshotDir() })
   ipcMain.on('reset-screenshot-dir', resetScreenshotDir)
+  ipcMain.on('set-screenshot-dest', (_e, dest: unknown) => {
+    if (!SHOT_DESTS.includes(dest as ShotDest)) return
+    settings.screenshotDest = dest as ShotDest
+    saveSettings()
+    broadcastSettingsState()
+  })
   ipcMain.on('hotkey-capture', (_e, on: unknown) => setHotkeyCapture(Boolean(on)))
   ipcMain.on('toolbar-drag-start', (_e, p: unknown) => {
     if (!toolbar || toolbar.isDestroyed() || !isPoint(p)) return
