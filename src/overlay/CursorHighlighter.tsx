@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react'
 
 // The click-through cursor highlighter's paint layer: a halo that follows the
-// real cursor, plus Epic-Pen-style click feedback. On the primary button the
+// real cursor, plus a click-feedback pulse. On the primary button the
 // ring contracts as you hold; the instant you release, a fresh full-size halo is
 // already on the cursor while the contracted ring detaches and swells outward as
 // it fades. It lives on its own canvas above the ink so it never disturbs the

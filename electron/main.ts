@@ -62,7 +62,7 @@ const TOOLBAR_H = 720
 const state: AppState = { mode: false, highlight: false, bg: 'none', hidden: false, toolState: null }
 
 // Persisted main-process settings. protectUi excludes the toolbar from screen
-// capture (WDA_EXCLUDEFROMCAPTURE) so OBS recordings and screenshots show ink
+// capture (WDA_EXCLUDEFROMCAPTURE) so screen recordings and screenshots show ink
 // but not the UI.
 const settings: Settings = { protectUi: !IS_DEV }
 let hotkeys: HotkeyMap = { ...DEFAULT_HOTKEYS }
@@ -392,9 +392,9 @@ function destroyWithOwner (win: BrowserWindow | undefined): void {
 // minus taskbar) — both at construction and on setBounds — so a full-monitor
 // overlay silently ends at the taskbar's top edge and ink "clips" there. The
 // same trick fitToolbarHeight uses unclamps it: briefly resizable around the
-// setBounds. (Epic Pen's draw surface is exactly monitor-sized too; full size is
-// safe here because these windows are never focused and never opaque, so the
-// shell's fullscreen-app handling and occlusion throttling don't kick in.)
+// setBounds. (Full size is safe here because these windows are never focused and
+// never opaque, so the shell's fullscreen-app handling and occlusion throttling
+// don't kick in.)
 function setBoundsUnclamped (win: BrowserWindow, b: Electron.Rectangle): void {
   win.setResizable(true)
   win.setBounds(b)
@@ -443,7 +443,7 @@ function createOverlay (d: Display, index: number): void {
   // native topmost bit again (measured), so the real raise comes after both.
   raiseOverlayTopmost(win)
   win.setMenu(null)
-  // Stable title so OBS window-capture users can find the overlay per display.
+  // Stable title so window-capture tools can find the overlay per display.
   const title = index === 0 ? 'OpenPen Overlay' : `OpenPen Overlay ${index + 1}`
   win.on('page-title-updated', ev => ev.preventDefault())
   win.setTitle(title)
@@ -729,10 +729,10 @@ function updateGlobalEditShortcuts (): void {
 }
 
 // --- Cursor highlighter ------------------------------------------------------
-// A click-through presentation aid (Epic-Pen style) and a variant of mouse mode:
-// the overlays stay pass-through so you keep using the apps underneath, while a
-// halo follows the real cursor. On the primary button the halo pulses — it
-// contracts on press and swells+fades on release (Epic Pen's click feedback) —
+// A click-through presentation aid and a variant of mouse mode: the overlays
+// stay pass-through so you keep using the apps underneath, while a halo follows
+// the real cursor. On the primary button the halo pulses — it contracts on
+// press and swells+fades on release (click feedback) —
 // and Ctrl+Shift+wheel resizes it. The halo position is polled from the OS cursor
 // (DIP coords, DPI-safe, works even if the native hook is unavailable) and
 // forwarded to the overlay under the cursor; the button/wheel input is read from a
@@ -1092,12 +1092,12 @@ function endEyedrop (): void {
 function showCaptureHelp (): void {
   void dialog.showMessageBox({
     type: 'info',
-    title: 'OpenPen: screen capture and OBS setup',
-    message: 'Capturing your annotations (OBS, Zoom, screenshots, clips)',
+    title: 'OpenPen: screen capture setup',
+    message: 'Capturing your annotations in recordings, calls, and screenshots',
     detail: [
-      'OpenPen ink is drawn in a normal on-screen window, so any "Display Capture" source records it automatically. This is the recommended OBS setup.',
+      'OpenPen ink is drawn in a normal on-screen window, so any full-screen (display) capture source records it automatically. This is the recommended setup.',
       '',
-      'If you use Window Capture or Game Capture only, add one extra Window Capture source for the window named "OpenPen Overlay" (one per display), place it above your game source, and set its capture method to "Windows 10 (1903 and up)".',
+      'If your recorder captures a single window or game only, add a window-capture source for the window named "OpenPen Overlay" (one per display), place it above your game source, and — if the overlay records as black — switch that source to the newer Windows Graphics Capture method.',
       '',
       '"Hide toolbar from capture" (in the tray menu, on by default) keeps the toolbar and color picker visible to you but excluded from recordings, screenshots, and other screen capture.'
     ].join('\n')
@@ -1295,7 +1295,7 @@ function buildTrayMenu (): Menu {
         saveSettings()
       }
     },
-    { label: 'Capture / OBS setup…', click: showCaptureHelp }
+    { label: 'Screen capture setup…', click: showCaptureHelp }
   ]
   // Update actions only make sense in an installed build.
   if (app.isPackaged) {

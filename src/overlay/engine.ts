@@ -512,7 +512,7 @@ export class Engine {
   private dragDy = 0
   private raf = 0
   private replayRaf = 0
-  // Fading ink (Epic-Pen style): when on, finished strokes/shapes aren't
+  // Fading ink: when on, finished strokes/shapes aren't
   // committed to the undo document — they go here and fade out on their own, so
   // they're temporary annotations that never need clearing.
   private fadeMode = false
@@ -582,7 +582,7 @@ export class Engine {
     if (changed) this.scheduleRepaint()
   }
 
-  // Toggle Epic-Pen-style fading ink and set how long a stroke lives (ms) before
+  // Toggle fading ink and set how long a stroke lives (ms) before
   // it's fully gone. Turning it off leaves anything already fading to finish.
   setFadeMode (on: boolean, durMs = this.fadeDur): void {
     this.fadeMode = on
