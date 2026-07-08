@@ -194,20 +194,44 @@ function pathLength (pts: Point[]): number {
   return len
 }
 
-// Heading (radians) at the stroke's tip: from the last point at least `back` px
-// behind the tip, toward the tip. Walking back that far keeps the arrowhead
-// steady when the final segment is tiny (a slow release would otherwise jitter
-// the angle).
-function tipAngle (pts: Point[], back: number): number {
+// Heading (radians) at the stroke's tip: the chord over a `back`-px window of
+// path ending `trim` px before the tip. Distances are measured along the path,
+// not as the crow flies — a curled ending must not pick a reference on the
+// wrong side of the curl. The trim drops the last few pixels the hand smears
+// while releasing the button, so that wobble anchors the head (it is the real
+// tip) but never steers it; the chord over the window is the length-weighted
+// average of the segment directions before the wobble. If the path curls so
+// tightly that the chord collapses, keep walking until it's meaningful — a
+// degenerate chord would aim the head at a garbage angle.
+// Exported for unit tests.
+export function tipAngle (pts: Point[], back: number, trim = 0): number {
   const tip = pts[pts.length - 1]
+  let ax = tip.x
+  let ay = tip.y
   let bx = pts[0].x
   let by = pts[0].y
+  let along = 0
+  let trimmed = trim <= 0
   for (let i = pts.length - 2; i >= 0; i--) {
+    along += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y)
+    if (!trimmed) {
+      if (along < trim) continue
+      trimmed = true
+      ax = pts[i].x
+      ay = pts[i].y
+      along = 0
+      continue
+    }
     bx = pts[i].x
     by = pts[i].y
-    if (Math.hypot(tip.x - bx, tip.y - by) >= back) break
+    if (along >= back && Math.hypot(ax - bx, ay - by) >= back * 0.3) break
   }
-  return Math.atan2(tip.y - by, tip.x - bx)
+  // A stroke barely longer than the trim can leave the window empty; fall back
+  // to the plain tip→start chord rather than a zero vector.
+  if (Math.hypot(ax - bx, ay - by) < 0.01) {
+    return Math.atan2(tip.y - pts[0].y, tip.x - pts[0].x)
+  }
+  return Math.atan2(ay - by, ax - bx)
 }
 
 // `alpha` scales the op's opacity (1 = normal). Used for the eraser-hover dim
@@ -275,11 +299,15 @@ function renderOp (ctx: CanvasRenderingContext2D, op: Op, alpha = 1): void {
       const tip = pts[pts.length - 1]
       const len = pathLength(pts)
       const head = Math.min(arrowHeadLen(op.size), len)
-      // Aim the head along the line's heading AT the tip — a short local window,
-      // not the full barb chord. On a curved approach the chord points off the
-      // line and the head looks rotated; the local heading keeps the barbs
-      // symmetric about the line so it always enters the head dead-centre.
-      const ang = tipAngle(pts, Math.min(head, Math.max(op.size, 6)))
+      // Aim the head along the line's heading AT the tip — a local window, not
+      // the full barb chord (on a curved approach that chord points off the
+      // line and the head looks rotated) — and skip the last few pixels of
+      // mouse-release wobble so a straight line always gets a dead-centre head.
+      const ang = tipAngle(
+        pts,
+        clamp(head / 2, Math.max(op.size, 8), head),
+        Math.min(6, len / 4),
+      )
       const spread = Math.PI / 6
       ctx.beginPath()
       ctx.moveTo(tip.x, tip.y)

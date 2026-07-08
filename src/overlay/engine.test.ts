@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { InkDoc } from './engine'
-import type { Op } from './engine'
+import { InkDoc, tipAngle } from './engine'
+import type { Op, Point } from './engine'
 
 // A minimal pen op — enough to stand in as a drawable object in the log.
 const pen = (id: number): Op => ({ kind: 'pen', id, color: '#000', size: 1, points: [] })
@@ -118,5 +118,82 @@ describe('InkDoc.offsets', () => {
     d.push({ kind: 'clear' })
     d.push(pen(1))
     expect(d.offsets().has(1)).toBe(false)
+  })
+})
+
+// The curved-arrow head is two barbs at exactly ±30° around tipAngle's result,
+// so "the line enters the head dead-centre" is equivalent to: tipAngle returns
+// the line's true heading at the tip. These pin that down, including the noise
+// cases that used to tilt the head.
+describe('tipAngle', () => {
+  const deg = (rad: number): number => (rad * 180) / Math.PI
+  // Signed difference between an angle (rad) and a reference (deg), wrapped.
+  const angDiff = (a: number, refDeg: number): number => {
+    let d = deg(a) - refDeg
+    while (d >= 180) d -= 360
+    while (d < -180) d += 360
+    return d
+  }
+  // The renderer's window/trim shape for a default-size arrow (head 27px).
+  const WINDOW = 13.5
+  const TRIM = 6
+
+  const vertical = (wobble: Point[] = []): Point[] => {
+    const pts: Point[] = []
+    for (let y = 400; y >= 80; y -= 6) pts.push({ x: 100, y })
+    return pts.concat(wobble)
+  }
+
+  it('is exact on straight lines at any angle', () => {
+    expect(deg(tipAngle(vertical(), WINDOW, TRIM))).toBeCloseTo(-90, 5)
+    const right: Point[] = []
+    for (let x = 0; x <= 300; x += 6) right.push({ x, y: 50 })
+    expect(deg(tipAngle(right, WINDOW, TRIM))).toBeCloseTo(0, 5)
+    const diag: Point[] = []
+    for (let i = 0; i <= 50; i++) diag.push({ x: i * 4, y: i * 4 })
+    expect(deg(tipAngle(diag, WINDOW, TRIM))).toBeCloseTo(45, 5)
+  })
+
+  it('ignores mouse-release wobble on a straight line', () => {
+    // A 4px sideways smear over the last ~5px of path — the classic release
+    // hook. The head must stay exactly vertical.
+    const pts = vertical([
+      { x: 99, y: 77 },
+      { x: 97, y: 75 },
+      { x: 96, y: 74 }
+    ])
+    expect(deg(tipAngle(pts, WINDOW, TRIM))).toBeCloseTo(-90, 5)
+  })
+
+  it('tracks the final heading of a deliberate hook, not the approach', () => {
+    // Travel right, then curve to end heading straight up.
+    const pts: Point[] = [{ x: 0, y: 300 }]
+    let dir = 0
+    let x = 0
+    let y = 300
+    for (let i = 0; i < 50; i++) {
+      if (i >= 35) dir = -(Math.PI / 2) * ((i - 35) / 14) // ease 0° → -90°
+      x += Math.cos(dir) * 6
+      y += Math.sin(dir) * 6
+      pts.push({ x, y })
+    }
+    const a = tipAngle(pts, WINDOW, TRIM)
+    // Close to straight up, and nowhere near the approach direction.
+    expect(Math.abs(angDiff(a, -90))).toBeLessThan(15)
+    expect(Math.abs(angDiff(a, 0))).toBeGreaterThan(60)
+  })
+
+  it('returns a finite angle when the stroke curls tightly at the end', () => {
+    const pts: Point[] = []
+    for (let x = 0; x <= 120; x += 6) pts.push({ x, y: 100 })
+    for (let a = 0; a <= Math.PI * 2; a += 0.3) {
+      pts.push({ x: 120 + Math.sin(a) * 4, y: 96 + Math.cos(a) * 4 })
+    }
+    expect(Number.isFinite(tipAngle(pts, WINDOW, TRIM))).toBe(true)
+  })
+
+  it('handles strokes shorter than the trim window', () => {
+    const flick: Point[] = [{ x: 0, y: 0 }, { x: 3, y: 0 }]
+    expect(deg(tipAngle(flick, WINDOW, TRIM))).toBeCloseTo(0, 5)
   })
 })
