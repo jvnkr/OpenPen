@@ -10,6 +10,8 @@
 
 Get the latest Windows installer from [Releases](https://github.com/jvnkr/OpenPen/releases).
 
+Windows installers are built from source in GitHub Actions when a version tag is pushed. Code signing for Windows releases is provided by [SignPath Foundation](https://signpath.org/). See [Code signing policy](docs/CODE_SIGNING.md) for details.
+
 ## Features
 
 - Draw over any app with a transparent overlay that stays on top

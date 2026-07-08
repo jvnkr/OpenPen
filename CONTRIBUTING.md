@@ -70,10 +70,8 @@ Use `npm version patch|minor|major` if you prefer it to bump `package.json` and
 create the tag in one step, then `git push --follow-tags`.
 
 The workflow builds on Windows (x64 + arm64) and publishes NSIS installer,
-portable, and zip assets to a published GitHub Release for that tag.
-
-Builds are currently **unsigned**, so Windows SmartScreen will warn on first
-run until the project has a code-signing certificate.
+portable, and zip assets to a published GitHub Release for that tag. See
+[docs/CODE_SIGNING.md](docs/CODE_SIGNING.md) for the Windows code signing policy.
 
 ## Reporting bugs
 
