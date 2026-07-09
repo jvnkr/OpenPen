@@ -782,6 +782,7 @@ export default function Toolbar(): React.JSX.Element {
               <Button
                 variant="ghost"
                 className="h-7 w-full rounded-sm px-0 [&_svg]:size-3.5"
+                disabled={!hist.clearable}
                 aria-label="Export annotations"
                 onClick={() => window.openpen.send("export")}
               >
