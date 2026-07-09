@@ -195,6 +195,10 @@
   border-radius: var(--radius-md);
   border-bottom: none;
   margin-bottom: 8px;
+  /* ColorPicker replaces the stock dual CSS gradient with a PNG bitmap
+     (--op-sat-overlay) so popover zoom scales pixels instead of recompositing
+     gradients (Chromium paints a horizontal seam otherwise). */
+  background-image: var(--op-sat-overlay, none);
 }
 .react-colorful__hue {
   height: 12px;
@@ -205,5 +209,8 @@
   height: 14px;
   border: 2px solid var(--background);
   box-shadow: 0 0 0 1px var(--border);
+  /* Eyedrop picks update top/left while the toolbar is faded; never tween the
+     thumb or it will still be sliding when opacity returns. */
+  transition: none !important;
 }
 

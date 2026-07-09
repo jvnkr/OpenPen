@@ -1,7 +1,7 @@
 {
   "name": "open-pen",
   "productName": "OpenPen",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "A free and open source on-screen annotation tool for Windows.",
   "license": "MIT",
   "author": "OpenPen contributors",
@@ -44,6 +44,7 @@
     "onlyBuiltDependencies": [
       "electron",
       "esbuild",
+      "koffi",
       "uiohook-napi"
     ]
   },
@@ -54,6 +55,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "electron-updater": "^6.8.9",
+    "koffi": "^3.1.0",
     "lucide-react": "^1.23.0",
     "perfect-freehand": "^1.2.3",
     "react": "^19.1.0",
@@ -97,7 +99,8 @@
       "package.json"
     ],
     "asarUnpack": [
-      "**/node_modules/uiohook-napi/**"
+      "**/node_modules/uiohook-napi/**",
+      "**/node_modules/koffi/**"
     ],
     "directories": {
       "output": "release"

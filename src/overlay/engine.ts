@@ -566,6 +566,14 @@ export class InkDoc {
     return true
   }
 
+  // Discard the entire log and both stacks — a hard history reset, after which
+  // there is nothing to undo or redo.
+  reset (): void {
+    this.ops = []
+    this.redoStack = []
+    this.idSeq = 1
+  }
+
   // Snapshot the whole log for persistence. Redo history is intentionally left
   // out — undone work isn't restored across restarts.
   serialize (): SerializedDoc {
@@ -912,8 +920,27 @@ export class Engine {
     return true
   }
 
+  // Drop every in-progress gesture without committing. Needed when draw mode
+  // ends (input catchers hide before pointer-up arrives), and before clear /
+  // reset so a mid-stroke release can't resurrect ink after the wipe.
+  cancelGestures (): void {
+    if (!this.active) return
+    this.live.clear()
+    this.erasing = false
+    this.erasePointer = -1
+    this.pendingErase = new Set()
+    this.dragging = false
+    this.dragPointer = -1
+    this.dragId = -1
+    this.dragDx = 0
+    this.dragDy = 0
+    this.hoverEraseId = -1
+    this.replay()
+  }
+
   clearInk (): void {
     // Clear wipes the screen, including any ink still fading.
+    this.cancelGestures()
     const hadFading = this.fading.length > 0
     this.fading = []
     if (!this.doc.clearable) {
@@ -922,6 +949,20 @@ export class Engine {
     }
     this.push({ kind: 'clear' })
     this.replay()
+  }
+
+  // Wipe everything — every op plus the undo/redo stacks — so nothing remains to
+  // undo or redo. Unlike clearInk (which keeps history so the clear itself can be
+  // undone), this is irreversible; the now-empty doc autosaves, which removes the
+  // persisted board file.
+  resetHistory (): void {
+    this.cancelGestures()
+    this.fading = []
+    this.pendingErase = new Set()
+    this.hoverEraseId = -1
+    this.doc.reset()
+    this.replay()
+    this.notify()
   }
 
   undo (): void {
@@ -942,7 +983,11 @@ export class Engine {
   load (data: SerializedDoc): void {
     this.doc.load(data)
     this.replay()
-    this.onHistory({ canUndo: this.doc.canUndo, canRedo: this.doc.canRedo })
+    this.onHistory({
+      canUndo: this.doc.canUndo,
+      canRedo: this.doc.canRedo,
+      clearable: this.doc.clearable
+    })
   }
 
   // The current document as a persistable snapshot.
@@ -1117,7 +1162,11 @@ export class Engine {
   }
 
   private notify (): void {
-    this.onHistory({ canUndo: this.doc.canUndo, canRedo: this.doc.canRedo })
+    this.onHistory({
+      canUndo: this.doc.canUndo,
+      canRedo: this.doc.canRedo,
+      clearable: this.doc.clearable
+    })
     this.onChange?.()
   }
 

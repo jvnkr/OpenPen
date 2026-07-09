@@ -20,6 +20,9 @@ export interface ToolState {
 export interface HistoryState {
   canUndo: boolean
   canRedo: boolean
+  // True when there is uncleared ink on screen (distinct from canUndo: after a
+  // clear, undo is still available but the board is already empty).
+  clearable: boolean
 }
 
 // The renderer↔main message API is fully typed by its channel contract; see

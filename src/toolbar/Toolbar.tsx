@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import {
   ArrowUpRight,
   Camera,
@@ -9,6 +10,7 @@ import {
   Eraser,
   Eye,
   Highlighter,
+  ListX,
   Minus,
   MousePointer2,
   MousePointerClick,
@@ -195,6 +197,11 @@ export default function Toolbar(): React.JSX.Element {
   const saved = useRef(loadSaved()).current;
   const [tool, setTool] = useState<Tool>(saved.tool ?? "pen");
   const [color, setColor] = useState(saved.color ?? "#ff3b30");
+  // Bumped when colour arrives from the screen eyedropper so HexColorInput
+  // remounts with the new value (its internal field can lag the prop). Do not
+  // remount the whole ColorPicker: that restarts the popover zoom and makes the
+  // saturation pointer look like it slides from the old colour.
+  const [hexEpoch, setHexEpoch] = useState(0);
   const [size, setSize] = useState(saved.size ?? 6);
   const [fade, setFade] = useState(saved.fade ?? false);
   const [fadeMs, setFadeMs] = useState(saved.fadeMs ?? 2000);
@@ -206,6 +213,7 @@ export default function Toolbar(): React.JSX.Element {
   const [hist, setHist] = useState<HistoryState>({
     canUndo: false,
     canRedo: false,
+    clearable: false,
   });
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [hotkeys, setHotkeys] = useState<HotkeyMap>(DEFAULT_HOTKEYS);
@@ -259,6 +267,20 @@ export default function Toolbar(): React.JSX.Element {
         setColorOpen(false);
         overPanel.current = false;
         window.openpen.send("toolbar-interactive", false);
+      }),
+      // Screen eyedropper result while the toolbar is still faded. Commit the
+      // colour synchronously so the picker pointer is already at the new spot
+      // before main restores opacity (no visible slide).
+      window.openpen.on("set-color", (hex) => {
+        flushSync(() => {
+          setColor(hex);
+          setHexEpoch((n) => n + 1);
+        });
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            window.openpen.send("color-ready");
+          });
+        });
       }),
       window.openpen.on("update-badge", (s) => setUpdateAvailable(s.available)),
       window.openpen.on("hotkeys", setHotkeys),
@@ -553,7 +575,12 @@ export default function Toolbar(): React.JSX.Element {
               className="w-48"
               aria-label="Custom color"
             >
-              <ColorPicker color={color} onChange={setColor} />
+              <ColorPicker
+                color={color}
+                hexKey={hexEpoch}
+                onChange={setColor}
+                onEyedrop={() => window.openpen.send("eyedrop-start")}
+              />
             </PopoverContent>
           </Popover>
 
@@ -718,11 +745,22 @@ export default function Toolbar(): React.JSX.Element {
               <Button
                 variant="destructive"
                 className="h-7 w-full rounded-sm px-0 [&_svg]:size-3.5"
-                disabled={!hist.canUndo}
+                disabled={!hist.clearable}
                 aria-label="Clear screen"
                 onClick={() => cmd("clear")}
               >
                 <Trash2 />
+              </Button>
+            </Tip>
+            <Tip label="Clear undo history">
+              <Button
+                variant="ghost"
+                className="h-7 w-full rounded-sm px-0 [&_svg]:size-3.5"
+                disabled={!hist.canUndo && !hist.canRedo}
+                aria-label="Clear undo history"
+                onClick={() => cmd("reset-history")}
+              >
+                <ListX />
               </Button>
             </Tip>
             <ScreenshotTip

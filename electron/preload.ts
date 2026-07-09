@@ -13,7 +13,10 @@ const SEND = new Set([
   'pick-screenshot-dir', 'reset-screenshot-dir', 'set-screenshot-dest',
   'open-screenshot-dir', 'set-restore-ink', 'save-board', 'export-result',
   'check-for-updates', 'install-update',
-  'eyedrop-start', 'eyedrop-pick', 'eyedrop-cancel'
+  'eyedrop-start', 'eyedrop-pick', 'eyedrop-cancel', 'color-ready'
+])
+const INVOKE = new Set([
+  'eyedrop-sample'
 ])
 const ON = new Set([
   'tool-state', 'mode', 'bg', 'cmd', 'history',
@@ -21,7 +24,8 @@ const ON = new Set([
   'load-board', 'export-board',
   'pick-tool', 'adjust-size', 'hidden',
   'theme', 'close-menus', 'screenshotting', 'screenshot-saved',
-  'tooltip-side', 'set-theme', 'settings-state', 'hotkeys', 'update-badge', 'eyedrop'
+  'tooltip-side', 'set-theme', 'settings-state', 'hotkeys', 'update-badge', 'eyedrop',
+  'set-color'
 ])
 
 contextBridge.exposeInMainWorld('openpen', {
@@ -33,6 +37,10 @@ contextBridge.exposeInMainWorld('openpen', {
     const listener = (_e: IpcRendererEvent, data: unknown): void => fn(data)
     ipcRenderer.on(channel, listener)
     return () => ipcRenderer.removeListener(channel, listener)
+  },
+  invoke (channel: string, data?: unknown): Promise<unknown> {
+    if (!INVOKE.has(channel)) return Promise.reject(new Error(`Unknown invoke channel: ${channel}`))
+    return ipcRenderer.invoke(channel, data)
   },
   // Synchronous save on its own channel: blocks until main has written to disk,
   // so a final flush at quit can't be lost to the process exiting first.

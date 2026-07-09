@@ -1,12 +1,10 @@
-import React, { useEffect, useMemo, useRef } from 'react'
+import React, { useEffect, useRef } from 'react'
 
-// Screen colour picker. The main process freezes the display under the cursor
-// (content-protected so OpenPen's own UI is excluded) and sends the PNG here.
-// We show it 1:1, sample the exact pixel under the cursor from an offscreen
-// canvas at the capture's native resolution, and render a magnifier loupe so
-// the user can land on the pixel they want. Click picks, right-click/Esc cancels.
+// Realtime screen colour picker. The overlay stays transparent; on each move we
+// ask main for a tiny live BitBlt around the cursor and paint it into the loupe.
+// No full-display freeze, no PNG round-trip.
 
-export interface EyeDropData { png: Uint8Array; x: number; y: number }
+export interface EyeDropData { x: number; y: number }
 
 interface Props {
   data: EyeDropData
@@ -14,77 +12,90 @@ interface Props {
   onCancel: () => void
 }
 
-const LOUPE = 132 // loupe diameter (px)
-const ZOOM = 11 // magnification inside the loupe (also the highlighted cell size)
-const toHex = (n: number): string => n.toString(16).padStart(2, '0')
+// Odd sample so the cursor pixel sits dead-centre. Loupe size is an exact
+// multiple of the sample so each screen pixel maps to an integer block of
+// loupe pixels (no fractional stretch that makes cells look too wide).
+const SAMPLE = 11
+const PIXEL = 12 // CSS px per screen pixel inside the loupe
+const LOUPE = SAMPLE * PIXEL
 
 export default function EyeDropper ({ data, onPick, onCancel }: Props): React.JSX.Element {
   const W = window.innerWidth
   const H = window.innerHeight
-  const imgUrl = useMemo(
-    () => URL.createObjectURL(new Blob([data.png as BlobPart], { type: 'image/png' })),
-    [data]
-  )
-  useEffect(() => () => URL.revokeObjectURL(imgUrl), [imgUrl])
-
-  // Offscreen canvas at the capture's native resolution for exact pixel reads.
-  const sampleRef = useRef<CanvasRenderingContext2D | null>(null)
-  const scaleRef = useRef(1) // native image px per CSS px
-  const loupeRef = useRef<HTMLDivElement>(null)
+  const loupeRef = useRef<HTMLCanvasElement>(null)
+  const loupeWrapRef = useRef<HTMLDivElement>(null)
   const dotRef = useRef<HTMLSpanElement>(null)
   const hexRef = useRef<HTMLSpanElement>(null)
   const currentHex = useRef('#000000')
+  const pending = useRef(false)
+  const lastCss = useRef({ x: data.x, y: data.y })
 
-  const readAt = (cssX: number, cssY: number): string => {
-    const ctx = sampleRef.current
-    if (!ctx) return currentHex.current
-    const s = scaleRef.current
-    const px = Math.max(0, Math.min(ctx.canvas.width - 1, Math.round(cssX * s)))
-    const py = Math.max(0, Math.min(ctx.canvas.height - 1, Math.round(cssY * s)))
-    const [r, g, b] = ctx.getImageData(px, py, 1, 1).data
-    return `#${toHex(r)}${toHex(g)}${toHex(b)}`
-  }
-
-  // Update the loupe + readout by writing straight to the DOM (no re-render).
-  const paint = (cssX: number, cssY: number): void => {
-    const hex = readAt(cssX, cssY)
+  const paintLoupe = (rgba: Uint8Array, width: number, height: number, hex: string): void => {
     currentHex.current = hex
-    const loupe = loupeRef.current
-    if (loupe) {
-      // Offset the loupe from the cursor, flipping near the right/bottom edges.
-      let lx = cssX + 20
-      let ly = cssY + 20
-      if (lx + LOUPE > W) lx = cssX - LOUPE - 20
-      if (ly + LOUPE > H) ly = cssY - LOUPE - 20
-      loupe.style.transform = `translate(${lx}px, ${ly}px)`
-      loupe.style.backgroundPosition =
-        `${LOUPE / 2 - cssX * ZOOM}px ${LOUPE / 2 - cssY * ZOOM}px`
+    const canvas = loupeRef.current
+    if (canvas) {
+      const ctx = canvas.getContext('2d')
+      if (ctx) {
+        // Put the sample 1:1 into a tiny canvas, then nearest-neighbour scale
+        // by an integer factor so each screen pixel is a sharp PIXEL×PIXEL block.
+        const tmp = document.createElement('canvas')
+        tmp.width = width
+        tmp.height = height
+        const tctx = tmp.getContext('2d')
+        if (tctx) {
+          const img = tctx.createImageData(width, height)
+          img.data.set(rgba)
+          tctx.putImageData(img, 0, 0)
+          ctx.imageSmoothingEnabled = false
+          ctx.clearRect(0, 0, LOUPE, LOUPE)
+          ctx.drawImage(tmp, 0, 0, width, height, 0, 0, LOUPE, LOUPE)
+        }
+      }
     }
     if (dotRef.current) dotRef.current.style.background = hex
     if (hexRef.current) hexRef.current.textContent = hex.toUpperCase()
   }
 
-  useEffect(() => {
-    const img = new Image()
-    img.onload = () => {
-      const c = document.createElement('canvas')
-      c.width = img.naturalWidth
-      c.height = img.naturalHeight
-      const ctx = c.getContext('2d', { willReadFrequently: true })
-      if (!ctx) return
-      ctx.drawImage(img, 0, 0)
-      sampleRef.current = ctx
-      scaleRef.current = img.naturalWidth / W
-      paint(data.x, data.y)
-    }
-    img.src = imgUrl
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imgUrl])
+  const placeLoupe = (cssX: number, cssY: number): void => {
+    const wrap = loupeWrapRef.current
+    if (!wrap) return
+    let lx = cssX + 20
+    let ly = cssY + 20
+    if (lx + LOUPE > W) lx = cssX - LOUPE - 20
+    if (ly + LOUPE > H) ly = cssY - LOUPE - 20
+    wrap.style.transform = `translate(${lx}px, ${ly}px)`
+  }
 
-  const onMove = (e: React.PointerEvent<HTMLDivElement>): void => paint(e.clientX, e.clientY)
+  const sampleAt = (cssX: number, cssY: number): void => {
+    lastCss.current = { x: cssX, y: cssY }
+    placeLoupe(cssX, cssY)
+    if (pending.current) return
+    pending.current = true
+    void window.openpen.invoke('eyedrop-sample', { x: cssX, y: cssY, size: SAMPLE })
+      .then(sample => {
+        pending.current = false
+        if (!sample) return
+        // If the pointer moved while we waited, kick another sample so the
+        // loupe catches up without queuing a storm of IPC calls.
+        const { x, y } = lastCss.current
+        if (x !== cssX || y !== cssY) sampleAt(x, y)
+        paintLoupe(sample.rgba, sample.width, sample.height, sample.hex)
+      })
+      .catch(() => { pending.current = false })
+  }
+
+  useEffect(() => {
+    sampleAt(data.x, data.y)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const onMove = (e: React.PointerEvent<HTMLDivElement>): void => sampleAt(e.clientX, e.clientY)
   const onClick = (e: React.MouseEvent<HTMLDivElement>): void => {
     if (e.button !== 0) return
-    onPick(readAt(e.clientX, e.clientY))
+    // Use the loupe's current hex immediately so the toolbar can unhide with the
+    // picked colour already applied (no wait on a final sample round-trip).
+    placeLoupe(e.clientX, e.clientY)
+    onPick(currentHex.current)
   }
   const onCtx = (e: React.MouseEvent<HTMLDivElement>): void => { e.preventDefault(); onCancel() }
 
@@ -96,18 +107,9 @@ export default function EyeDropper ({ data, onPick, onCancel }: Props): React.JS
       onClick={onClick}
       onContextMenu={onCtx}
     >
-      <img src={imgUrl} width={W} height={H} draggable={false} alt="" />
-      <div
-        ref={loupeRef}
-        className="eyedrop-loupe"
-        style={{
-          width: LOUPE,
-          height: LOUPE,
-          backgroundImage: `url(${imgUrl})`,
-          backgroundSize: `${W * ZOOM}px ${H * ZOOM}px`
-        }}
-      >
-        <div className="eyedrop-cell" style={{ width: ZOOM, height: ZOOM }} />
+      <div ref={loupeWrapRef} className="eyedrop-loupe" style={{ width: LOUPE, height: LOUPE }}>
+        <canvas ref={loupeRef} width={LOUPE} height={LOUPE} className="eyedrop-loupe-canvas" />
+        <div className="eyedrop-cell" style={{ width: PIXEL, height: PIXEL }} />
       </div>
       <div className="eyedrop-badge">
         <span ref={dotRef} className="eyedrop-swatch" />

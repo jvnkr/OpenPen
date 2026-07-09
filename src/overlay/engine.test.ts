@@ -55,6 +55,21 @@ describe('InkDoc history', () => {
   })
 })
 
+describe('InkDoc.reset', () => {
+  it('wipes ops, both stacks and the id counter', () => {
+    const d = new InkDoc()
+    d.push(pen(1))
+    d.push(pen(2))
+    d.undo() // leaves something on the redo stack too
+    d.reset()
+    expect(d.canUndo).toBe(false)
+    expect(d.canRedo).toBe(false)
+    expect(d.all).toHaveLength(0)
+    expect(d.clearable).toBe(false)
+    expect(d.newId()).toBe(1)
+  })
+})
+
 describe('InkDoc serialize/load', () => {
   it('round-trips the op log, id counter and derived queries', () => {
     const d = new InkDoc()

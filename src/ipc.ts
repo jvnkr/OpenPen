@@ -29,6 +29,20 @@ export type ExportResult =
 export type UpdateStatus = 'idle' | 'checking' | 'downloading' | 'ready' | 'uptodate' | 'error'
 export interface Point2 { x: number; y: number }
 
+// Live eyedropper sample: a tiny RGBA patch around the cursor plus the centre hex.
+export interface EyeDropSample {
+  rgba: Uint8Array
+  width: number
+  height: number
+  hex: string
+}
+export interface EyeDropSampleReq {
+  // Overlay-local CSS coordinates (clientX/clientY).
+  x: number
+  y: number
+  size: number
+}
+
 // Pointer traffic from an input-catcher window to its display's ink overlay.
 // Drawing input is captured by a separate nearly-invisible window (so the ink
 // window can stay permanently click-through and never pauses the apps behind
@@ -112,9 +126,16 @@ export interface SendMap {
   'eyedrop-start': void
   'eyedrop-pick': string
   'eyedrop-cancel': void
+  // Toolbar finished applying a set-color while still faded; main can reveal.
+  'color-ready': void
   'check-for-updates': void
   'install-update': void
   'quit': void
+}
+
+// Request/response channels (ipcRenderer.invoke).
+export interface InvokeMap {
+  'eyedrop-sample': { req: EyeDropSampleReq; res: EyeDropSample | null }
 }
 
 // Messages the renderer RECEIVES from the main process.
@@ -153,15 +174,20 @@ export interface RecvMap {
   'settings-state': SettingsState
   'hotkeys': HotkeyMap
   'update-badge': UpdateBadgeState
+  // Realtime eyedropper session: cursor seed while picking, null when done.
   'eyedrop': EyeDropData | null
+  // Screen eyedropper result routed back to the toolbar as the active colour.
+  'set-color': string
 }
 
 // Channels with a `void` payload take no data argument; all others require it.
 export type SendArgs<K extends keyof SendMap> = SendMap[K] extends void ? [] : [data: SendMap[K]]
+export type InvokeArgs<K extends keyof InvokeMap> = [data: InvokeMap[K]['req']]
 
 export interface OpenPenApi {
   send<K extends keyof SendMap>(channel: K, ...args: SendArgs<K>): void
   on<K extends keyof RecvMap>(channel: K, fn: (data: RecvMap[K]) => void): () => void
+  invoke<K extends keyof InvokeMap>(channel: K, ...args: InvokeArgs<K>): Promise<InvokeMap[K]['res']>
   // Synchronous final save (teardown/quit): blocks until main has written the
   // board, so the last change can't be lost to the app exiting.
   flush (doc: SerializedDoc): void

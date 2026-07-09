@@ -106,7 +106,12 @@ export default function Overlay (): React.JSX.Element {
         eng.setLiveSize(s.size)
       }),
       window.openpen.on('mode', m => {
-        if (!m) commitEditRef.current(false)
+        if (!m) {
+          // Input catchers hide without delivering pointer-ups; drop any live
+          // stroke/erase/drag so it can't keep painting after leaving draw mode.
+          commitEditRef.current(false)
+          eng.cancelGestures()
+        }
         setMode(m)
       }),
       window.openpen.on('highlight', setHighlight),
@@ -135,6 +140,7 @@ export default function Overlay (): React.JSX.Element {
         if (c === 'undo') eng.undo()
         else if (c === 'redo') eng.redo()
         else if (c === 'clear') { commitEditRef.current(true); eng.clearInk() }
+        else if (c === 'reset-history') { commitEditRef.current(true); eng.resetHistory() }
         else if (c === 'escape') {
           // Arrives via a global shortcut, so it works even when no OpenPen
           // window has focus. Same priority as the local key handler: finish
@@ -189,7 +195,7 @@ export default function Overlay (): React.JSX.Element {
       if (ev.ctrlKey || ev.altKey || ev.metaKey) return
       if (ev.key === '[') window.openpen.send('adjust-size', -2)
       else if (ev.key === ']') window.openpen.send('adjust-size', 2)
-      else if (ev.key === 'Delete') eng.clearInk()
+      else if (ev.key === 'Delete') window.openpen.send('cmd', 'clear')
     }
     window.addEventListener('keydown', onKey)
 

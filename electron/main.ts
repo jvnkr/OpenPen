@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import { autoUpdater } from 'electron-updater'
 import { JsonBoardStore, type BoardStore, type StoredBoard, type SerializedDoc } from './boardStore.js'
+import { sampleScreenRegion } from './screenSample.js'
 import {
   DEFAULT_HOTKEYS, HOTKEY_ACTIONS, mergeHotkeys,
   findHotkeyConflict, isValidAccelerator, isHotkeyBound,
@@ -24,7 +25,7 @@ const APP_ID = app.isPackaged ? 'dev.openpen.app' : 'dev.openpen.app.dev'
 type Bg = 'none' | 'white' | 'black'
 interface ToolState { tool: string; color: string; size: number }
 interface AppState { mode: boolean; highlight: boolean; bg: Bg; hidden: boolean; toolState: ToolState | null }
-interface HistoryState { canUndo: boolean; canRedo: boolean }
+interface HistoryState { canUndo: boolean; canRedo: boolean; clearable: boolean }
 // Where Ctrl+Shift+S sends the capture: a PNG file, the clipboard, or both.
 // Mirrors ScreenshotDest in src/ipc.ts (main compiles separately).
 type ShotDest = 'file' | 'clipboard' | 'both'
@@ -41,9 +42,15 @@ const inputDisplayByWc = new Map<number, number>()
 // Map an ink overlay's webContents id to its display, so a save-board or
 // overlay-ready message can be routed to the right monitor's board.
 const overlayDisplayByWc = new Map<number, number>()
-// Display currently frozen for the screen eyedropper (one at a time).
+// Display whose overlay is currently hosting the live eyedropper loupe.
 let eyedropDisplayId: number | null = null
-let eyedropCapturing = false
+// True while the eyedropper session is active (blocks raiseStack from burying it).
+let eyedropActive = false
+// UI windows faded out for the session (opacity 0, still shown) so reveal doesn't
+// remount / refit and jump. Hide/show was causing a visible scale blink.
+let eyedropUiFaded = false
+// Waiting for the toolbar to paint the picked colour before opacity returns.
+let eyedropRevealTimer: NodeJS.Timeout | null = null
 // Per-overlay history, keyed by webContents id; aggregated for the toolbar.
 const overlayHistory = new Map<number, HistoryState>()
 let toolbar: BrowserWindow | null = null
@@ -221,7 +228,7 @@ function createZFloor (): void {
 // passing above the UI. Paused during an eyedrop, which deliberately raises a
 // frozen overlay above the UI windows so the whole screen stays sample-able.
 function raiseStack (strong = false): void {
-  if (eyedropDisplayId !== null || eyedropCapturing || state.hidden) return
+  if (eyedropDisplayId !== null || eyedropActive || state.hidden) return
   if (!zFloor || zFloor.isDestroyed()) return
   if (strong) raiseOverlayTopmost(zFloor)
   else zFloor.moveTop()
@@ -739,7 +746,7 @@ function enterMouseMode (): void {
 // matter which OpenPen window, if any, currently holds focus.
 let editShortcutsOn = false
 let escShortcutOn = false
-let aggHist: HistoryState = { canUndo: false, canRedo: false }
+let aggHist: HistoryState = { canUndo: false, canRedo: false, clearable: false }
 
 function updateGlobalEditShortcuts (): void {
   const wantEdit = state.mode || (!state.hidden && (aggHist.canUndo || aggHist.canRedo))
@@ -991,25 +998,27 @@ function toggleBg (c: Bg): void {
 function pushHistory (): void {
   let canUndo = false
   let canRedo = false
+  let clearable = false
   for (const h of overlayHistory.values()) {
     canUndo = canUndo || h.canUndo
     canRedo = canRedo || h.canRedo
+    clearable = clearable || h.clearable
   }
-  aggHist = { canUndo, canRedo }
+  aggHist = { canUndo, canRedo, clearable }
   send(toolbar, 'history', aggHist)
   updateGlobalEditShortcuts()
 }
 
-// clear wipes every display; undo/redo act on the display under the cursor.
+// clear and reset-history wipe every display; undo/redo act on the display under
+// the cursor.
 function runCmd (name: string): void {
-  if (name === 'clear') sendOverlays('cmd', 'clear')
+  if (name === 'clear' || name === 'reset-history') sendOverlays('cmd', name)
   else send(overlayAtCursor(), 'cmd', name)
 }
 
-// Grab a screenshot of one display at its native pixel resolution. The shared
-// capture primitive behind the screenshot and eyedropper features; hides the
-// resolution math and the per-display source lookup (with fallback). Null when
-// the OS returns no usable source.
+// Grab a screenshot of one display at its native pixel resolution. Used by the
+// screenshot feature; hides the resolution math and the per-display source
+// lookup (with fallback). Null when the OS returns no usable source.
 async function captureDisplay (d: Display): Promise<Electron.NativeImage | null> {
   const sources = await desktopCapturer.getSources({
     types: ['screen'],
@@ -1022,27 +1031,6 @@ async function captureDisplay (d: Display): Promise<Electron.NativeImage | null>
   return src ? src.thumbnail : null
 }
 
-// Keep OpenPen's own windows out of the *next* frozen capture (the eyedropper
-// must not photograph the toolbar). Returns a restore fn. No-op with no settle
-// wait when capture protection is already on (the default), so the common path
-// pays nothing.
-async function hideUiForFreeze (): Promise<() => void> {
-  const alreadyProtected = !IS_DEV && settings.protectUi
-  if (!alreadyProtected) {
-    toolbar?.setContentProtection(true)
-    settingsWin?.setContentProtection(true)
-    await new Promise(r => setTimeout(r, 50))
-  }
-  return () => { if (!alreadyProtected) applyUiCaptureProtection() }
-}
-
-// Hand a frozen overlay back to click-through (the input catchers own the
-// pointer again; endEyedrop's raiseStack already re-stacked them) and repaint
-// the OS cursor when returning to mouse mode. The exit tail of an eyedropper.
-function restoreOverlayInput (win: BrowserWindow | undefined): void {
-  if (win && !win.isDestroyed()) win.setIgnoreMouseEvents(true, { forward: false })
-  if (!state.mode) enterMouseMode()
-}
 
 // Captures the display under the cursor. OpenPen's own screenshot includes the
 // toolbar so users can capture and share the UI while iterating.
@@ -1056,7 +1044,10 @@ async function shoot (): Promise<void> {
     }
     await new Promise(r => setTimeout(r, 120)) // let UI cleanup and capture protection settle
     const img = await captureDisplay(d)
-    if (!img) return
+    if (!img) {
+      notify('OpenPen', 'Screenshot failed. Try again.')
+      return
+    }
     const dest = settings.screenshotDest
     // Clipboard gets the native image directly; the file path is the anchor for
     // the "reveal in folder" notification when we also wrote one.
@@ -1084,6 +1075,7 @@ async function shoot (): Promise<void> {
     n.show()
   } catch (err) {
     console.error('screenshot failed', err)
+    notify('OpenPen', 'Screenshot failed. Try again.')
   } finally {
     if (restoreProtection) applyUiCaptureProtection()
     send(toolbar, 'screenshotting', false)
@@ -1199,59 +1191,98 @@ async function writePdfFromImage (dataUrl: string, width: number, height: number
   }
 }
 
-// Screen colour picker. The native EyeDropper Web API only samples this app's
-// own compositor surface in Electron, so we roll our own: freeze the display
-// under the cursor onto its overlay and let the renderer sample a pixel with a
-// magnifier loupe. The picker window is left where it is — raising
-// the frozen overlay above every UI window means the whole screen (even the
-// area under the toolbar/picker) is sample-able, and they reappear on exit.
-async function startEyedrop (): Promise<void> {
-  if (eyedropDisplayId !== null || eyedropCapturing) return
+// Live screen colour picker. Samples a tiny region under the cursor via Win32
+// BitBlt on every move — no full-display freeze. The toolbar stays shown at
+// opacity 0 and click-through (not hide/show, not z-raised) so reveal is a
+// plain opacity restore with no Windows recompose zoom.
+function startEyedrop (): void {
+  if (eyedropDisplayId !== null || eyedropActive) return
   if (state.hidden) setHidden(false)
   const d = displayAtCursor()
   const win = overlays.get(d.id)
   if (!win || win.isDestroyed()) return
-  eyedropCapturing = true
-  const restoreUi = await hideUiForFreeze()
-  try {
-    const img = await captureDisplay(d)
-    if (!img) return
-    const cur = screen.getCursorScreenPoint()
-    eyedropDisplayId = d.id
-    win.setIgnoreMouseEvents(false, { forward: false })
-    // PNG (lossless) rather than JPEG — colour accuracy matters more than size
-    // for a one-shot pick.
-    send(win, 'eyedrop', {
-      png: img.toPNG(),
-      x: cur.x - d.bounds.x,
-      y: cur.y - d.bounds.y
-    })
-    win.moveTop()
-    // Escape cancels; the non-activating overlay can't get key focus, so grab it
-    // globally for the duration and hand it back in endEyedrop.
-    globalShortcut.register('Escape', endEyedrop)
-  } catch (err) {
-    console.error('eyedrop capture failed', err)
-  } finally {
-    restoreUi()
-    eyedropCapturing = false
+  if (eyedropRevealTimer) {
+    clearTimeout(eyedropRevealTimer)
+    eyedropRevealTimer = null
   }
+  eyedropActive = true
+  eyedropDisplayId = d.id
+  // Fade UI out without hide() or raiseStack: hide/show refits height, and
+  // moveAbove/topmost toggles recompose as a zoom. Opacity 0 + click-through
+  // lets the loupe sit under the (invisible) toolbar and still receive input.
+  eyedropUiFaded = true
+  if (toolbar && !toolbar.isDestroyed()) {
+    toolbar.setContentProtection(true)
+    toolbar.setIgnoreMouseEvents(true, { forward: false })
+    toolbar.setOpacity(0)
+  }
+  if (settingsWin && !settingsWin.isDestroyed()) {
+    settingsWin.setContentProtection(true)
+    settingsWin.setIgnoreMouseEvents(true, { forward: false })
+    settingsWin.setOpacity(0)
+  }
+  // Exclude this overlay from BitBlt so live samples see the desktop underneath
+  // the transparent loupe window, not our own pixels.
+  win.setContentProtection(true)
+  win.setIgnoreMouseEvents(false, { forward: false })
+  const cur = screen.getCursorScreenPoint()
+  send(win, 'eyedrop', {
+    x: cur.x - d.bounds.x,
+    y: cur.y - d.bounds.y
+  })
+  // Escape cancels; the non-activating overlay can't get key focus, so grab it
+  // globally for the duration and hand it back in endEyedrop.
+  globalShortcut.register('Escape', () => endEyedrop())
 }
 
-function endEyedrop (): void {
-  if (eyedropDisplayId === null) return
-  const win = overlays.get(eyedropDisplayId)
+// Tear down the loupe overlay and Escape grab. Optionally leave the toolbar
+// faded so a picked colour can paint before opacity returns.
+function endEyedrop (opts?: { keepUiFaded?: boolean }): void {
+  if (!eyedropActive && eyedropDisplayId === null && !eyedropUiFaded) return
+  const win = eyedropDisplayId !== null ? overlays.get(eyedropDisplayId) : undefined
   eyedropDisplayId = null
-  if (win && !win.isDestroyed()) send(win, 'eyedrop', null)
+  eyedropActive = false
+  if (win && !win.isDestroyed()) {
+    send(win, 'eyedrop', null)
+    win.setContentProtection(false)
+    win.setIgnoreMouseEvents(true, { forward: false })
+  }
   // Release our Escape grab and let the normal draw-mode gating reclaim it.
   globalShortcut.unregister('Escape')
   escShortcutOn = false
   updateGlobalEditShortcuts()
-  // Restore the whole stack: catchers back above the (now live) overlays, the
-  // toolbar/picker back on top. The reflex only fires on input, so do it here —
-  // strongly: the click-through flips around an eyedrop can strip topmost bits.
-  raiseStack(true)
-  restoreOverlayInput(win)
+  if (!state.mode) enterMouseMode()
+  if (opts?.keepUiFaded) return
+  revealEyedropUi()
+}
+
+function revealEyedropUi (): void {
+  if (eyedropRevealTimer) {
+    clearTimeout(eyedropRevealTimer)
+    eyedropRevealTimer = null
+  }
+  if (!eyedropUiFaded) return
+  eyedropUiFaded = false
+  // Opacity only. Any other window API (raiseStack, topmost, contentProtection,
+  // ignoreMouseEvents) makes Windows recompose the toolbar as a zoom.
+  if (toolbar && !toolbar.isDestroyed()) toolbar.setOpacity(1)
+  if (settingsWin && !settingsWin.isDestroyed()) settingsWin.setOpacity(1)
+  // Restore input + capture protection on the next tick, after opacity has
+  // settled, so those calls can't hitch the reveal frame.
+  setTimeout(() => {
+    if (toolbar && !toolbar.isDestroyed()) armToolbarInput()
+    if (settingsWin && !settingsWin.isDestroyed()) settingsWin.setIgnoreMouseEvents(false)
+    applyUiCaptureProtection()
+  }, 0)
+}
+
+// Overlay-local CSS point → physical screen pixels for BitBlt.
+function eyedropPhysicalPoint (cssX: number, cssY: number): { x: number; y: number } | null {
+  if (eyedropDisplayId === null) return null
+  const win = overlays.get(eyedropDisplayId)
+  if (!win || win.isDestroyed()) return null
+  const b = win.getBounds()
+  return screen.dipToScreenPoint({ x: b.x + cssX, y: b.y + cssY })
 }
 
 function showCaptureHelp (): void {
@@ -1965,14 +1996,43 @@ function wireIpc (): void {
     toolbar.setIgnoreMouseEvents(!on, { forward: true })
   })
   ipcMain.on('toolbar-fit-height', (_e, height: unknown) => fitToolbarHeight(height))
-  ipcMain.on('eyedrop-start', () => { void startEyedrop() })
-  ipcMain.on('eyedrop-cancel', endEyedrop)
+  ipcMain.on('eyedrop-start', () => { startEyedrop() })
+  ipcMain.on('eyedrop-cancel', () => endEyedrop())
   ipcMain.on('eyedrop-pick', (_e, hex: unknown) => {
-    endEyedrop()
     if (typeof hex === 'string' && /^#[0-9a-fA-F]{6}$/.test(hex)) {
-      // Route through the toolbar so it becomes the active colour and is
-      // rebroadcast to the overlays (and echoed back to the picker).
+      // Apply colour while the toolbar is still opacity 0, drop the loupe, then
+      // wait for color-ready (toolbar painted) before revealing. Fallback timer
+      // so a missed ack can't leave the UI invisible forever.
       send(toolbar, 'set-color', hex.toLowerCase())
+      endEyedrop({ keepUiFaded: true })
+      if (eyedropRevealTimer) clearTimeout(eyedropRevealTimer)
+      eyedropRevealTimer = setTimeout(() => {
+        eyedropRevealTimer = null
+        revealEyedropUi()
+      }, 200)
+    } else {
+      endEyedrop()
+    }
+  })
+  ipcMain.on('color-ready', () => {
+    if (!eyedropUiFaded) return
+    revealEyedropUi()
+  })
+  // Live loupe sample: tiny BitBlt around the cursor, returned as RGBA + hex.
+  ipcMain.handle('eyedrop-sample', (_e, raw: unknown) => {
+    if (!eyedropActive || eyedropDisplayId === null) return null
+    const req = raw as { x?: unknown; y?: unknown; size?: unknown }
+    if (typeof req?.x !== 'number' || typeof req?.y !== 'number') return null
+    const size = typeof req.size === 'number' && req.size > 0 ? Math.min(64, Math.floor(req.size)) : 15
+    const pt = eyedropPhysicalPoint(req.x, req.y)
+    if (!pt) return null
+    const sample = sampleScreenRegion(pt.x, pt.y, size)
+    if (!sample) return null
+    return {
+      rgba: sample.rgba,
+      width: sample.width,
+      height: sample.height,
+      hex: sample.hex
     }
   })
   ipcMain.on('toggle-hide', () => setHidden(!state.hidden))
