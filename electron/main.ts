@@ -1221,6 +1221,12 @@ function startEyedrop (): void {
     settingsWin.setIgnoreMouseEvents(true, { forward: false })
     settingsWin.setOpacity(0)
   }
+  // Same as text editing: in draw mode the input catchers sit above the ink
+  // overlay and would steal every pointer event, freezing the loupe at its
+  // seed position. Drop them for the session so the overlay can drive the pick.
+  for (const iw of inputs.values()) {
+    if (!iw.isDestroyed()) iw.hide()
+  }
   // Exclude this overlay from BitBlt so live samples see the desktop underneath
   // the transparent loupe window, not our own pixels.
   win.setContentProtection(true)
@@ -1246,6 +1252,14 @@ function endEyedrop (opts?: { keepUiFaded?: boolean }): void {
     send(win, 'eyedrop', null)
     win.setContentProtection(false)
     win.setIgnoreMouseEvents(true, { forward: false })
+  }
+  // Hand the pointer back to the catchers when still drawing (mirrors the
+  // text-editing release path). Defer raiseStack to revealEyedropUi so it
+  // doesn't recompose the toolbar as a zoom while opacity is still 0.
+  if (state.mode && !state.hidden) {
+    for (const iw of inputs.values()) {
+      if (!iw.isDestroyed()) iw.showInactive()
+    }
   }
   // Release our Escape grab and let the normal draw-mode gating reclaim it.
   globalShortcut.unregister('Escape')
@@ -1273,6 +1287,9 @@ function revealEyedropUi (): void {
     if (toolbar && !toolbar.isDestroyed()) armToolbarInput()
     if (settingsWin && !settingsWin.isDestroyed()) settingsWin.setIgnoreMouseEvents(false)
     applyUiCaptureProtection()
+    // Catchers were re-shown in endEyedrop; slot them under the toolbar now
+    // that opacity has settled (eyedropActive no longer blocks raiseStack).
+    if (state.mode && !state.hidden) raiseStack(true)
   }, 0)
 }
 

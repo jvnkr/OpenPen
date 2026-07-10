@@ -22,8 +22,8 @@ export default function Overlay (): React.JSX.Element {
   const [edit, setEdit] = useState<EditState | null>(null)
   const [eyedrop, setEyedrop] = useState<EyeDropData | null>(null)
 
-  const latest = useRef({ tool, mode, bg, edit })
-  latest.current = { tool, mode, bg, edit }
+  const latest = useRef({ tool, mode, bg, edit, eyedrop })
+  latest.current = { tool, mode, bg, edit, eyedrop }
 
   const commitEditRef = useRef<(cancel?: boolean) => void>(() => {})
   commitEditRef.current = (cancel = false) => {
@@ -155,6 +155,9 @@ export default function Overlay (): React.JSX.Element {
       // pointer handlers below, which still serve text editing / eyedropping,
       // the phases where this window becomes interactive itself.
       window.openpen.on('draw-input', d => {
+        // Eyedrop owns the pointer on this window; ignore any stray catcher
+        // traffic if a catcher was still up when the session started.
+        if (latest.current.eyedrop) return
         const t = latest.current.tool
         if (d.t === 'down') {
           if (latest.current.edit) { commitEditRef.current(false); return }
